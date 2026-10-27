@@ -1,7 +1,7 @@
 # Checkpoint design (V5 main run)
 
 Team 07, Infrastructure. Status: **draft for review**, week 1.
-Code: [`../ckpt/ckpt.py`](../ckpt/ckpt.py). Related: [`queue_design.md`](queue_design.md) and `../health/`.
+Code: [`../ckpt/ckpt.py`](../ckpt/ckpt.py), tests [`../ckpt/test_ckpt.py`](../ckpt/test_ckpt.py). Related: [ADR 0001](adr/0001-checkpoint-format-and-commit.md) (decisions, contracts, metrics; it wins where this draft differs), [ADR 0002](adr/0002-job-queue-slurm.md) (queue) and `../health/`.
 
 ## 1. Goal
 
@@ -167,17 +167,13 @@ The restore log says so, and the branch is marked `resume-resharded`.
 
 ## 7. When to save
 
-**Interval.** Young's formula (Session 15 §9):
-
-```text
-interval ≈ √(2 × stall_time × MTBF)
-```
-
-Only the **stall** counts, not the background write, because training continues during the write. The worked
-example in Session 15: 1 min save, 775 min MTBF, giving 39 min. The reference run used 25 min, V4 used
-min(500 steps, 30 min). **Our start value is 30 min.** We replace it with the formula once the week-2 node gives
-a measured stall time and the dry runs give an MTBF. The lower bound is the background pipeline time: the
-interval must exceed steps 4–7, or saves queue up.
+**Interval.** `interval = min(Young, eval cadence, RPO cap)`, with Young = √(2 × stall × MTBF). Only the
+**stall** counts, because training continues during the background write. Published failure rates scaled to our
+likely size (64–256 GPUs) give an MTBF of 39–790 h, so Young's formula alone would allow 1–5 h. Failure rate is
+therefore not the binding term; eval cadence and the most work we accept losing per failure are. **Start value:
+30 min** (RPO ≈ 15 min; V4 used min(500 steps, 30 min), the S15 reference run 25 min). It is revisited after the
+dry runs with measured stall and MTBF (ADR 0001 §4, §10). The interval must also exceed the background pipeline
+time (steps 4–7), or saves queue up.
 
 **Triggers,** all feeding one handler:
 
@@ -185,13 +181,13 @@ interval must exceed steps 4–7, or saves queue up.
 |---|---|---|---|
 | periodic | rank-0 timer or step count | save, continue | — |
 | SIGUSR2 | operator | save, continue | — |
-| SIGUSR1 | operator; Slurm `--signal=USR1@120` before walltime or preemption | save, stop | 75 (requeue) |
+| SIGUSR1 / SIGTERM | operator, health drain, spot watcher (`scancel --signal=USR1`); Slurm preemption (SIGTERM, then `GraceTime`) | save, wait for the commit, stop | 75 (requeue) |
 | spot notice | EC2 IMDSv2 `spot/instance-action`, polled every 5 s | emergency save, stop | 75 |
 | health fail | `health/` check between steps (Xid 79/94/95, ECC) | save if the GPUs still answer, stop | 75, node drained |
-| NaN / Inf | loss or grad-norm guard | **no save**; log, stop, print the resume command | 1 (fatal) |
+| NaN / Inf | loss or grad-norm guard | **no save**; log, stop | 78 (fatal, held) |
 | run done | max steps | final save, protected | 0 |
 
-The exit-code contract (0 done, 75 retry, 1 fatal) is what the queue uses to requeue or stop. See `queue_design.md`.
+The exit-code contract (0 done, 75 retry, 78 fatal) is what the queue uses to requeue or hold (`RequeueExit=75`, `RequeueExitHold=78`). See ADR 0001 §6 and ADR 0002 §5.
 
 ## 8. Retention and storage
 
@@ -215,17 +211,17 @@ The pass test holds only if the step is deterministic for a fixed world size:
 - every RNG saved and restored (§3);
 - the same world size and reduction order for continuation tests.
 
-**Week-1 tests** (`ckpt/ckpt.py`, CPU only, gloo backend):
+**Week-1 tests** (`ckpt/test_ckpt.py`, CPU only, gloo backend; T1–T10 pass, see ADR 0001 §Validation):
 
 | # | Test | Pass |
 |---|---|---|
 | T1 | Run A: K+M steps straight. Run B: K steps → save → **new process** → restore → M steps. Same world size (1, then 4 ranks) | loss at every step of B's M == A's, bit for bit (`==` on the float, not "close") |
 | T2 | Save on 4 ranks (sharded, ZeRO-style optimizer shards) → restore on **1 CPU process** | `probe_batch_loss` bit-equal to the value at save |
 | T3 | Flip one byte in one shard file | restore refuses at VERIFY and falls back to the previous checkpoint |
-| T4 | Kill the process between WRITE and SEAL | `latest` still points at the previous checkpoint; the `.tmp` dir is ignored and cleaned |
+| T4 | Kill the process between WRITE and SEAL | `latest` still points at the previous checkpoint; the prefix without a manifest is ignored and removed by retention |
 | T5 | Rename one key in the state (the V4 converter bug) | strict LOAD aborts and names the key |
 | T6 | Send SIGUSR1 mid-run | save completes, exit code 75, T1 still passes after the restart |
-| T7 | Inject NaN | no checkpoint written, exit code 1, the printed resume command works |
+| T7 | Inject NaN | no checkpoint written, exit code 78 |
 
 Week 2 (GPU node): the same tests on CUDA, plus measured stall, write and upload times for a randomly
 initialised model of the final shape. You don't need a trained model to measure checkpoint speed (Session 15).

@@ -1,0 +1,103 @@
+# Week-1 review: what the simulation showed, and what the instructor may ask
+
+Team 07, 27 Oct 2026. Companion to ADR 0001–0004. Every item below is marked:
+
+- **FIXED + TESTED**: changed, and a test or drill proves it;
+- **DECIDED**: a written decision in an ADR, nothing to run yet;
+- **OPEN**: needs something we do not have yet (GPUs, the AWS account, another team), with the reason.
+
+> **In simple words.** We broke a small copy of the cluster on purpose, many times, and wrote down what
+> happened. Then we listed the basic questions an instructor would ask about running a paid GPU training job,
+> checked each against our design, and fixed what we could test on a laptop.
+
+## 1. What the simulation shows
+
+Setup: a Docker Slurm cluster with two controllers, the accounting database, an **S3 emulator** (the real S3
+code runs against it), three "GPU" nodes with two placeholder GPUs each (allocation and accounting only; no
+computation) and one eval/CPU node. The main run uses 2 nodes × 2 ranks; the third node is the hot spare. The
+tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [sim_results.md](sim_results.md).
+
+RESULTS_TABLE
+
+How to read the goodput number in the report: the simulation injects a fault about every half minute, while a
+real run sees one every few hours to days. So "useful share of time" is low **by design of the test**. What
+matters is each step's duration (detection, reschedule, restore), which `cost/cost_model.py --measured`
+projects onto real failure rates.
+
+## 2. Bugs we found and fixed during the simulation
+
+| Found | Effect | Fix | Status |
+|---|---|---|---|
+| Slurm holds every requeued job ≈ 121 s (`BeginTime`) | ≈ 2 min of the whole cluster idle on every restart | `AuthInfo=cred_expire=30` (≈ 50 s, safe) | FIXED + TESTED |
+| our first fix for that (force an immediate start) | run 7: the job started while the old credential was valid, Slurm killed it ("credential revoked") and marked it FAILED: **main run lost** | hack removed; replaced by the row above | FIXED + TESTED |
+| `OMP_NUM_THREADS` changes the loss bits on CPU | a bit-equal restore check fails for the wrong reason | set in job scripts; recorded in the manifest | FIXED + TESTED |
+| torchrun turns a stop signal into exit 1 | preemption counted as a crash | trainers run under `srun` | FIXED + TESTED |
+| a drill's `pkill` matched its own shell | the test froze | `[t]rain.py` pattern | FIXED |
+| the rollback argument was not shell-quoted | rollback drill could not submit | quoted | FIXED + TESTED |
+| a 3rd kill within 30 min held the main run | the crash-loop cap **works**; the drills were too close in compressed time | crash-loop window scaled to the simulation's timescale (10 s) | FIXED + TESTED |
+| report: "8 interruptions per day" was 8 in 10 min | wrong alert level | rates divide by the observed window | FIXED + TESTED |
+| report: one hang counted once per rank | watchdog rate tripled | one count per hang | FIXED + TESTED |
+| report: the drill switch counted as a real Xid | H-01 false positive | H-01 counts only real Xid lines | FIXED + TESTED |
+| report: test-caused alerts not marked | readers think production is broken | column "Caused by the test?" (yes / fault rate / no) | FIXED + TESTED |
+
+## 3. Questions the instructor may ask, and our answer
+
+### A. Would it work on day 1 on EC2?
+
+| # | Question | Answer | Status |
+|---|---|---|---|
+| A1 | How does a job get its GPUs, and only its GPUs? | `GresTypes=gpu`; EC2 `gres.conf` `AutoDetect=nvml`; `cgroup.conf` `ConstrainDevices=yes`; job scripts ask `--gpus-per-node=8`; GPU-hours recorded per account (`AccountingStorageTRES=gres/gpu`). Drill: main run allocated `gres/gpu=4`; over-asking refused | FIXED + TESTED (Docker placeholders) |
+| A2 | Where is the S3 code? | `ckpt/store.py` `S3Store` (boto3, multipart, retries, SHA256 checksums). All checkpoint tests also pass against the S3 emulator, and every drill saves to it | FIXED + TESTED (emulator) |
+| A3 | Is the node's disk persistent? | No: p6 NVMe is instance store, wiped on stop. It is a cache only; restores always work from S3 | DECIDED (ADR 0001 §2) |
+| A4 | Does the same config run in Docker and on EC2? | yes: one `slurm.conf`; four small files differ (`site`, `nodes`, `gres`, `cgroup`) | FIXED |
+| A5 | What runs on EC2 that the Docker test cannot show? | real GPUs and NCCL, EFA, Pyxis/Enroot, power saving, IAM | OPEN: Kaggle kit for GPUs; AWS account for the rest |
+
+### B. What happens when things fail?
+
+| # | Question | Answer | Status |
+|---|---|---|---|
+| B1 | A process, a node, a GPU fails | drills: kill, node loss, health fail, spot notice, hang; each restarts by itself from the last commit | TESTED |
+| B2 | Two nodes fail and there is one spare | main run waits (no crash loop), Q-01 pages at 10 min; recovers when nodes return; no automatic shrink (decided: a smaller world is not bit-equal and needs a person to agree) | TESTED + DECIDED |
+| B3 | The process dies **during** a save | the half-uploaded checkpoint is never used; restore uses the previous commit | TESTED |
+| B4 | The process dies **during** a restore | next attempt restores the same checkpoint cleanly | TESTED |
+| B5 | The Slurm controller dies | backup controller takes over; training continues; new jobs accepted; primary returns | TESTED |
+| B6 | The accounting database is lost | daily dump; a backup counts only after a test restore with the same tables | TESTED |
+| B7 | The loss spikes without a NaN | spike guard: > 1.5 × median for 3 steps → no save, hold (78), rollback | TESTED |
+| B8 | NaN | no save, hold (78), rollback with skip and new branch | TESTED |
+| B9 | A job crashes again and again | 3 crashes in 30 min → hold; also caught the main run in run 4 | TESTED |
+| B10 | S3 is slow or down | uploads retry (boto3 standard mode); a save that cannot commit is `checkpoint.failed`, CK-03 pages after 2 in a row; training continues meanwhile | DECIDED; slow-S3 drill OPEN |
+| B11 | Silent data corruption | not covered in the first main run; step replay considered after dry run 2 | OPEN (known gap, ADR 0003 §2) |
+
+### C. Operations
+
+| # | Question | Answer | Status |
+|---|---|---|---|
+| C1 | How does a person get woken up? | `metrics/watch.py` raises `alert.fired` live and posts to a webhook (Team 08's pager). HIGH pages | FIXED + TESTED (fired live in the simulation) |
+| C2 | How is cost tracked per team? | Slurm GPU-minute budgets per account; AWS cost tags `v5:team/role/run/cluster` + AWS Budgets at 50/75/90% | DECIDED; Budgets need the account |
+| C3 | What if an instance runs outside Slurm? | `cost/find_unmanaged.py`: C-05 HIGH with dollars per day; untagged instances listed | FIXED + TESTED (fixtures) |
+| C4 | What if someone deletes the bucket? | versioning; only the retention role may delete; protected checkpoints replicated to a second region (deletes not replicated) | DECIDED (ADR 0001 §5) |
+| C5 | How do you upgrade image / driver / Slurm mid-run? | at a checkpoint: emergency save → roll nodes → requeue with `--allow-env-change` (logged); Slurm dbd → ctld → slurmd | DECIDED (ADR 0002 §11) |
+| C6 | Where are the logs? | node-local, shipped to S3 by Team 08's agent; 90 days, then Glacier | DECIDED |
+| C7 | Security | IAM role per job type, no keys, SSM only, munge key from Secrets Manager, pr-guard + gitleaks | DECIDED; needs the AWS account |
+
+### D. Evidence quality
+
+| # | Question | Answer | Status |
+|---|---|---|---|
+| D1 | Each drill ran once? | kill and SIGUSR1 run 3 times each; the report gives MTTR p50 / p95 / max per fault type | FIXED + TESTED |
+| D2 | A 1 MB checkpoint proves nothing about speed | `ckpt/bench_save.py` measures GPU-to-host and save speed; on Kaggle T4 now, on B200 in week 2 | OPEN (Kaggle run pending) |
+| D3 | Resharding is the easy DDP case | yes; FSDP/ZeRO-3 and expert-parallel resharding need Team 05's model | OPEN (week 2, ADR 0001 open points) |
+| D4 | The data loader is synthetic | `ckpt/loader_contract.py`: the test Teams 01/02's real loader must pass (save, resume, peek, skip); ours passes | FIXED; real loader OPEN (Teams 01/02) |
+| D5 | Prices are guesses | `cost/prices.yaml` says so (`checked: null`); decisions rest on ratios | OPEN: check on the AWS pricing page |
+
+## 4. Still open, with owner
+
+| Item | Needs | Owner |
+|---|---|---|
+| GPU behaviour (NCCL, nvidia-smi, CUDA bit-equal, save speed) | Kaggle run (`kaggle/run_gpu_checks.py`) | Team 07 |
+| EFA, Pyxis/Enroot, power saving, IAM, AWS Budgets, real S3 throughput | the AWS account and the week-2 node | Team 07 + instructor |
+| Sharded-state resharding (FSDP/EP) | Team 05's model and parallel layout | Team 05 + 07 |
+| Real data-loader state | the loader passing `ckpt/loader_contract.py` | Teams 01/02 |
+| Slow-S3 drill, silent data corruption | after dry run 1 | Team 07 |
+| Real prices, Capacity Block | AWS pricing page, booking | Team 07 + lead |
+| On-call rota and alert channel | people | lead + Team 08 |

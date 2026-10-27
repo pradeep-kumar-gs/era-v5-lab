@@ -1,0 +1,723 @@
+"""V5 checkpoint library (ADR 0001).
+
+In simple words:
+- A checkpoint is a saved copy of everything training needs to continue: weights, optimizer, random
+  number generators and the data position. If a machine dies, we continue from the last copy, so we only
+  lose the work done since that copy, not the money already spent.
+- We save in two steps. First a quick copy to the node's own disk (training waits for this part, the
+  "stall"). Then, in the background, an upload to S3 while training continues.
+- A checkpoint only counts once it is "committed": every file is uploaded, its checksum is checked,
+  and the MANIFEST (the list of files and checksums) is written last. The `latest.json` pointer is
+  moved only after that. So a half-written checkpoint can never be picked by mistake.
+- On restore we check the checkpoint before trusting it: checksums, exact key names and shapes, a
+  digest of every tensor, and the loss of one fixed probe batch, compared bit for bit.
+
+Storage layout (the S3 bucket is a directory in the Docker test):
+    <remote_root>/<run_id>/latest.json             pointer to the newest committed checkpoint
+    <remote_root>/<run_id>/commits.jsonl           every commit, in order (restore never lists dirs)
+    <remote_root>/<run_id>/pins.json               steps a person has pinned (never deleted)
+    <remote_root>/<run_id>/<branch>/step_<N>/      DCP files, extra_rank<r>.json, sums_rank<r>.json, MANIFEST.json
+"""
+import argparse
+import base64
+import hashlib
+import json
+import os
+import pickle
+import platform
+import random
+import shutil
+import struct
+import sys
+import threading
+import time
+import warnings
+
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from ckpt.store import open_store, wait_for  # noqa: E402
+from common.events import Timer, emit  # noqa: E402
+
+# DCP warns about single-process use and storage internals; they are expected here.
+warnings.filterwarnings("ignore", category=UserWarning, module=r"torch\.distributed\.checkpoint")
+
+# Exit codes shared by the trainer, the job script and Slurm (ADR 0001 §6).
+EXIT_DONE = 0     # finished
+EXIT_RETRY = 75   # state is safe (saved, or nothing to save): requeue, maybe on another node
+EXIT_FATAL = 78   # retrying will not help (NaN, failed checks): hold the job and page a person
+
+MANIFEST = "MANIFEST.json"
+SCHEMA = "v5-ckpt/1"
+
+
+class CheckpointError(Exception):
+    pass
+
+
+class IntegrityError(CheckpointError):
+    """A file does not match its checksum. Try the previous checkpoint."""
+
+
+class RestoreCheckError(CheckpointError):
+    """The restored state is not the saved state. Try the previous checkpoint."""
+
+
+class StrictLoadError(CheckpointError):
+    """Key names or shapes differ from the model. Every checkpoint would fail the same way: stop."""
+
+
+class EnvMismatchError(CheckpointError):
+    """Software or config differs from the saved run. Stop unless --allow-env-change is given."""
+
+
+class NonFiniteError(CheckpointError):
+    """NaN or Inf in the state. Never save it."""
+
+
+# ----------------------------------------------------------------------------- small helpers
+
+def rank() -> int:
+    return dist.get_rank() if dist.is_initialized() else 0
+
+
+def world() -> int:
+    return dist.get_world_size() if dist.is_initialized() else 1
+
+
+def local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+
+
+def barrier():
+    if dist.is_initialized():
+        dist.barrier()
+
+
+def comm_device() -> torch.device:
+    """NCCL only reduces GPU tensors; gloo reduces CPU tensors."""
+    if dist.is_initialized() and dist.get_backend() == "nccl":
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
+def all_true(flag: bool) -> bool:
+    if not dist.is_initialized():
+        return flag
+    t = torch.tensor([0 if flag else 1], dtype=torch.int32, device=comm_device())
+    dist.all_reduce(t, op=dist.ReduceOp.MAX)
+    return t.item() == 0
+
+
+def broadcast_obj(obj):
+    if not dist.is_initialized():
+        return obj
+    box = [obj]
+    dist.broadcast_object_list(box, src=0)
+    return box[0]
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def copy_with_sha(src: str, dst: str) -> tuple:
+    """Copy src to dst through a temp name, so a reader never sees half a file. Returns (sha256, bytes)."""
+    h = hashlib.sha256()
+    n = 0
+    tmp = dst + ".part"
+    with open(src, "rb") as fi, open(tmp, "wb") as fo:
+        for chunk in iter(lambda: fi.read(1 << 20), b""):
+            h.update(chunk)
+            fo.write(chunk)
+            n += len(chunk)
+        fo.flush()
+        os.fsync(fo.fileno())
+    os.replace(tmp, dst)
+    return h.hexdigest(), n
+
+
+def write_json_atomic(path: str, obj) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=1, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def float_bits(x: float) -> str:
+    """The exact bits of a float, so two values compare exactly, not after rounding."""
+    return struct.pack(">d", float(x)).hex()
+
+
+def flatten(sd, prefix: str = "") -> dict:
+    out = {}
+    if isinstance(sd, dict):
+        for k, v in sd.items():
+            out.update(flatten(v, f"{prefix}{k}."))
+    elif isinstance(sd, (list, tuple)):
+        for i, v in enumerate(sd):
+            out.update(flatten(v, f"{prefix}{i}."))
+    else:
+        out[prefix[:-1]] = sd
+    return out
+
+
+def tensor_items(sd) -> list:
+    return sorted((k, v) for k, v in flatten(sd).items() if isinstance(v, torch.Tensor))
+
+
+def tensor_bytes(t: torch.Tensor) -> bytes:
+    return t.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+
+
+def state_digest(sd) -> str:
+    """sha256 over every tensor's raw bytes, in sorted key order. Equal digest = identical state."""
+    h = hashlib.sha256()
+    for k, t in tensor_items(sd):
+        h.update(k.encode())
+        h.update(str(t.dtype).encode())
+        h.update(str(tuple(t.shape)).encode())
+        h.update(tensor_bytes(t))
+    return h.hexdigest()
+
+
+def key_spec(sd) -> dict:
+    return {k: [list(t.shape), str(t.dtype)] for k, t in tensor_items(sd)}
+
+
+def all_finite(sd) -> bool:
+    return all(torch.isfinite(t).all().item() for _, t in tensor_items(sd) if t.is_floating_point())
+
+
+def device_class(model=None) -> str:
+    """Where the probe loss is computed: CPU and each GPU model give different (but repeatable) bits."""
+    dev = next(model.parameters()).device if model is not None else torch.device("cpu")
+    if dev.type == "cuda":
+        return f"cuda:{torch.cuda.get_device_name(dev)}"
+    return dev.type
+
+
+def env_manifest(config_path: str = None) -> dict:
+    env = {
+        "git_sha": os.environ.get("GIT_SHA", "unknown"),
+        "image_digest": os.environ.get("IMAGE_DIGEST", "unknown"),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+        "cuda": torch.version.cuda or "none",
+        "nccl": ".".join(map(str, torch.cuda.nccl.version())) if torch.cuda.is_available() else "none",
+        "tokenizer_sha": os.environ.get("TOKENIZER_SHA", "unknown"),
+        "config_sha256": sha256_file(config_path) if config_path and os.path.exists(config_path) else "none",
+        # Found in the Docker test: OMP_NUM_THREADS changes the last bits of the loss on CPU even with
+        # torch.set_num_threads(1). Thread count is part of the environment for a bit-equal resume.
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
+    }
+    return env
+
+
+# Fields that must match to resume. A change in any of them changes the numbers training produces.
+ENV_MUST_MATCH = ("image_digest", "torch", "cuda", "nccl", "config_sha256", "tokenizer_sha", "git_sha",
+                  "omp_num_threads")
+
+
+def rng_capture() -> dict:
+    st = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "cuda": [torch.cuda.get_rng_state(i) for i in range(torch.cuda.device_count())]
+        if torch.cuda.is_available() else [],
+    }
+    return {"pickle_b64": base64.b64encode(pickle.dumps(st)).decode()}
+
+
+def rng_restore(d: dict) -> None:
+    st = pickle.loads(base64.b64decode(d["pickle_b64"]))
+    random.setstate(st["python"])
+    np.random.set_state(st["numpy"])
+    torch.set_rng_state(st["torch_cpu"])
+    for i, s in enumerate(st["cuda"][: torch.cuda.device_count()]):
+        torch.cuda.set_rng_state(s, i)
+
+
+def rng_reseed(seed: int, step: int, r: int) -> None:
+    """After a world-size change the old per-rank RNG streams do not map to the new ranks."""
+    s = (seed * 1_000_003 + step * 101 + r) % (2 ** 31)
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+
+
+# ----------------------------------------------------------------------------- the checkpointer
+
+def drill_value(name: str):
+    """Test-only hooks for the Docker drills: a number in $V5_DRILL_DIR/<name>. Never set in production."""
+    d = os.environ.get("V5_DRILL_DIR")
+    p = os.path.join(d, name) if d else None
+    if p and os.path.exists(p):
+        try:
+            return float(open(p).read().strip())
+        except ValueError:
+            return None
+    return None
+
+
+def run_url(remote_root: str, run_id: str) -> str:
+    return remote_root.rstrip("/") + "/" + run_id
+
+
+class Checkpointer:
+    def __init__(self, run_id: str, local_root: str, remote_root: str, branch: str = "main",
+                 keep_local: int = 2, config_path: str = None, seed: int = 0,
+                 frozen_keys: tuple = (), upload_timeout_s: float = 300.0, nvme_headroom: float = 1.2,
+                 verify_mode: str = None):
+        self.run_id = run_id
+        self.branch = branch
+        self.local_run = os.path.join(local_root, run_id)
+        self.remote_url = run_url(remote_root, run_id)
+        self.store = open_store(self.remote_url)
+        self.keep_local = keep_local
+        self.config_path = config_path
+        self.seed = seed
+        self.frozen_keys = tuple(frozen_keys)
+        self.upload_timeout_s = upload_timeout_s
+        self.nvme_headroom = nvme_headroom
+        # full: re-read and hash every object (tests, small checkpoints); head: trust S3's stored checksum
+        self.verify_mode = verify_mode or os.environ.get("V5_VERIFY_MODE", "full")
+        self._thread = None
+        self._ok = True
+        self.last_rank_bytes = 0
+        self.last_commit_step = None
+        self.last_commit_time = None
+        os.makedirs(self.local_run, exist_ok=True)
+
+    # ---- paths
+    def step_rel(self, branch: str, step: int) -> str:
+        return f"{branch}/step_{step:08d}"
+
+    # ---- save
+    def save(self, step: int, model, optim, loader, probe_fn, tokens: int = 0, reason: str = "interval") -> bool:
+        """Blocking part of a save (the stall). The upload and commit run in a background thread.
+        Returns False if the save was skipped (no disk space). Raises NonFiniteError on NaN/Inf."""
+        t = Timer()
+        if rank() == 0:
+            emit("checkpoint.started", step=step, reason=reason, branch=self.branch)
+        waited = 0.0
+        if self._thread is not None and self._thread.is_alive():
+            # Only one save in flight. Waiting here is stall time: the interval is too short.
+            tw = Timer()
+            self._thread.join()
+            waited = tw.s()
+            if rank() == 0:
+                emit("checkpoint.backpressure", step=step, waited_s=waited)
+
+        msd, osd = get_state_dict(model, optim)
+        state = {"model": msd, "optim": osd}
+        if not all_true(all_finite(state)):
+            if rank() == 0:
+                emit("checkpoint.failed", step=step, cause="nonfinite", stall_s=t.s())
+            raise NonFiniteError(f"NaN/Inf in the state at step {step}; not saved")
+
+        local_dir = os.path.join(self.local_run, self.step_rel(self.branch, step))
+        os.makedirs(local_dir, exist_ok=True)
+        free = shutil.disk_usage(local_dir).free
+        need = self.last_rank_bytes * int(os.environ.get("SLURM_NTASKS_PER_NODE", "1")) * self.nvme_headroom
+        if not all_true(free >= need):
+            if rank() == 0:
+                emit("checkpoint.failed", step=step, cause="nvme_full", free_bytes=free, need_bytes=need)
+            return False
+
+        dcp.save(state, checkpoint_id=local_dir)
+        extra = {"step": step, "tokens": tokens, "world_size": world(), "rank": rank(),
+                 "rng": rng_capture(), "loader": loader.state_dict()}
+        with open(os.path.join(local_dir, f"extra_rank{rank()}.json"), "w") as f:
+            json.dump(extra, f)
+
+        meta = None
+        if rank() == 0:
+            flat = flatten(state)
+            meta = {
+                "schema": SCHEMA, "run_id": self.run_id, "branch": self.branch, "step": step,
+                "tokens": tokens, "world_size": world(), "reason": reason,
+                "env": env_manifest(self.config_path),
+                "keys": key_spec(state),
+                "state_digest": state_digest(state),
+                "frozen": {k: hashlib.sha256(tensor_bytes(flat[f"model.{k}"])).hexdigest()
+                           for k in self.frozen_keys},
+                "probe_loss": {device_class(model): float_bits(probe_fn(model))},
+                "next_batch": loader.next_batch_id(),
+            }
+        stall = t.s()
+        barrier()
+        self._ok = True
+        self._thread = threading.Thread(target=self._upload_and_commit,
+                                        args=(step, local_dir, meta, stall, waited), daemon=True)
+        self._thread.start()
+        return True
+
+    def _own_files(self, local_dir: str) -> list:
+        r = rank()
+        names = [n for n in os.listdir(local_dir)
+                 if n.startswith(f"__{r}_") or n == f"extra_rank{r}.json" or (r == 0 and n == ".metadata")]
+        return sorted(names)
+
+    def _upload_and_commit(self, step, local_dir, meta, stall, waited):
+        t_start = time.time()
+        rel = self.step_rel(self.branch, step)
+        st = self.store
+        try:
+            tu = Timer()
+            sums, nbytes = {}, 0
+            delay = drill_value("upload_delay_s")
+            for name in self._own_files(local_dir):
+                if delay:
+                    time.sleep(delay)  # drill only: a slow upload, so a kill lands mid-save
+                sha, n = st.put_file(os.path.join(local_dir, name), f"{rel}/{name}")
+                sums[name] = {"sha256": sha, "bytes": n}
+                nbytes += n
+            self.last_rank_bytes = nbytes
+            upload_s = tu.s()
+            st.put_json(f"{rel}/sums_rank{rank()}.json", sums)
+            if rank() != 0:
+                return
+            # Rank 0 waits for every rank's upload, then checks every object again in S3.
+            files = {}
+            for r in range(meta["world_size"]):
+                key = f"{rel}/sums_rank{r}.json"
+                if not wait_for(lambda: st.exists(key), self.upload_timeout_s):
+                    raise CheckpointError(f"rank {r} did not finish its upload in time")
+                files.update(st.get_json(key))
+            tv = Timer()
+            bad = [n for n, s in files.items() if st.sha256(f"{rel}/{n}", self.verify_mode) != s["sha256"]]
+            if bad:
+                raise IntegrityError(f"checksum mismatch after upload: {bad}")
+            verify_s = tv.s()
+            total = sum(s["bytes"] for s in files.values())
+            manifest = dict(meta, files=files, total_bytes=total, stall_s=stall,
+                            committed_at=time.time(), store=st.kind)
+            if os.environ.get("V5_TEST_CRASH_BEFORE_SEAL") == "1":
+                os._exit(9)  # test T4 only: the process dies after the upload, before the seal
+            st.put_json(f"{rel}/{MANIFEST}", manifest)
+            st.put_json("latest.json", {"step": step, "branch": self.branch, "path": rel})
+            st.append_line("commits.jsonl", json.dumps({"step": step, "branch": self.branch, "path": rel,
+                                                        "time": manifest["committed_at"], "reason": meta["reason"]}))
+            self.last_commit_step, self.last_commit_time = step, manifest["committed_at"]
+            latency = round(time.time() - t_start, 4)
+            emit("checkpoint.committed", step=step, branch=self.branch, reason=meta["reason"], stall_s=stall,
+                 backpressure_s=waited, commit_latency_s=latency, upload_s=upload_s, verify_s=verify_s,
+                 bytes=total, store=st.kind, upload_gbps=round(nbytes * 8 / 1e9 / max(upload_s, 1e-6), 4))
+        except Exception as e:  # noqa: BLE001 - every failure must become an event, then the caller decides
+            self._ok = False
+            emit("checkpoint.failed", step=step, cause=type(e).__name__, detail=str(e)[:500])
+        finally:
+            if local_rank() == 0:
+                self._local_retention()
+
+    def wait(self) -> bool:
+        """Block until the background upload is done. Call before exiting, so the save is committed."""
+        if self._thread is not None:
+            self._thread.join()
+        return all_true(self._ok)
+
+    def _local_retention(self):
+        dirs = []
+        for b in os.listdir(self.local_run):
+            bd = os.path.join(self.local_run, b)
+            if os.path.isdir(bd) and b != "restore":
+                dirs += [os.path.join(bd, s) for s in os.listdir(bd) if s.startswith("step_")]
+        dirs.sort(key=lambda p: os.path.getmtime(p))
+        for d in dirs[: max(0, len(dirs) - self.keep_local)]:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # ---- restore
+    def commits(self) -> list:
+        if not self.store.exists("commits.jsonl"):
+            return []
+        return [json.loads(line) for line in self.store.get_text("commits.jsonl").splitlines() if line.strip()]
+
+    def candidates(self, from_step: int = None) -> list:
+        commits = self.commits()
+        if from_step is not None:
+            return [c for c in reversed(commits) if c["step"] == from_step][:1]
+        if not self.store.exists("latest.json"):
+            return []
+        first = self.store.get_json("latest.json")
+        rest = [c for c in reversed(commits) if c["path"] != first["path"]]
+        return [first] + rest
+
+    def restore(self, model, optim, loader, probe_fn, from_step: int = None, skip: int = 0,
+                new_branch: str = None, allow_env_change: bool = False):
+        """Load the newest good checkpoint. Returns a dict about the restore, or None for a fresh start."""
+        cands = self.candidates(from_step)
+        if not cands:
+            if from_step is not None:
+                raise CheckpointError(f"no committed checkpoint at step {from_step}")
+            return None
+        for c in cands:
+            try:
+                info = self._restore_one(c, model, optim, loader, probe_fn, skip, allow_env_change)
+                if new_branch:
+                    self.branch = new_branch
+                    info["branch"] = new_branch
+                elif info["resharded"]:
+                    self.branch = f"{c['branch']}-resharded-w{world()}"
+                else:
+                    self.branch = c["branch"]
+                if rank() == 0:
+                    emit("restore.done", **info)
+                return info
+            except (IntegrityError, RestoreCheckError) as e:
+                if rank() == 0:
+                    emit("restore.failed", step=c["step"], cause=type(e).__name__, detail=str(e)[:800],
+                         fallback=from_step is None)
+                if from_step is not None:
+                    raise
+        raise CheckpointError("no usable checkpoint: every committed checkpoint failed its checks")
+
+    def _restore_one(self, c, model, optim, loader, probe_fn, skip, allow_env_change) -> dict:
+        t = Timer()
+        st = self.store
+        rel = c["path"]
+        man = st.get_json(f"{rel}/{MANIFEST}")
+        if rank() == 0:
+            emit("restore.started", step=man["step"], path=rel)
+        delay = drill_value("restore_delay_s")
+        if delay:
+            time.sleep(delay)  # drill only: a slow restore, so a kill lands mid-restore
+
+        # 1. Checksums of the objects in S3.
+        tv = Timer()
+        bad = None
+        if rank() == 0:
+            bad = [n for n, s in man["files"].items() if st.sha256(f"{rel}/{n}", self.verify_mode) != s["sha256"]]
+        bad = broadcast_obj(bad)
+        if bad:
+            raise IntegrityError(f"step {c['step']}: checksum mismatch in {bad}")
+        verify_s = tv.s()
+
+        # 2. Environment.
+        now = env_manifest(self.config_path)
+        diff = {k: [man["env"].get(k), now.get(k)] for k in ENV_MUST_MATCH if man["env"].get(k) != now.get(k)}
+        if diff and not allow_env_change:
+            raise EnvMismatchError(f"environment differs from the checkpoint: {diff}")
+
+        # 3. Download to this node's disk (one copy per node), checking each copy's checksum.
+        td = Timer()
+        local_dir = os.path.join(self.local_run, "restore", rel)
+        if local_rank() == 0:
+            os.makedirs(local_dir, exist_ok=True)
+            for n, s in man["files"].items():
+                sha, _ = st.get_file(f"{rel}/{n}", os.path.join(local_dir, n))
+                if sha != s["sha256"]:
+                    raise IntegrityError(f"local copy of {n} is damaged")
+        barrier()
+        download_s = td.s()
+
+        # 4. Strict key check: every name, shape and dtype must match. Lists every bad key.
+        msd, osd = get_state_dict(model, optim)
+        target = {"model": msd, "optim": osd}
+        want, have = man["keys"], key_spec(target)
+        missing = sorted(set(want) - set(have))
+        unexpected = sorted(set(have) - set(want))
+        changed = sorted(k for k in set(want) & set(have) if want[k] != have[k])
+        if missing or unexpected or changed:
+            raise StrictLoadError(f"strict load failed: missing in model={missing} "
+                                  f"not in checkpoint={unexpected} shape/dtype differs={changed}")
+
+        # 5. Load tensors (DCP reshards to the current world size), then RNG and data position.
+        tl = Timer()
+        dcp.load(target, checkpoint_id=local_dir)
+        set_state_dict(model, optim, model_state_dict=target["model"], optim_state_dict=target["optim"])
+        resharded = man["world_size"] != world()
+        extra_rank = 0 if resharded else rank()
+        with open(os.path.join(local_dir, f"extra_rank{extra_rank}.json")) as f:
+            extra = json.load(f)
+        loader.load_state_dict(extra["loader"])
+        if resharded:
+            rng_reseed(self.seed, man["step"], rank())
+        else:
+            rng_restore(extra["rng"])
+        load_s = tl.s()
+
+        # 6. Checks: the restored state must be the saved state.
+        tc = Timer()
+        msd, osd = get_state_dict(model, optim)
+        restored = {"model": msd, "optim": osd}
+        problems = []
+        digest = state_digest(restored)
+        if digest != man["state_digest"]:
+            problems.append(f"state digest saved={man['state_digest']} restored={digest}")
+        dc = device_class(model)
+        probe_now = float_bits(probe_fn(model))
+        probe_saved = man["probe_loss"].get(dc)
+        if probe_saved is not None and probe_now != probe_saved:
+            problems.append(f"probe loss bits saved={probe_saved} restored={probe_now} ({dc})")
+        nb = loader.next_batch_id()
+        if nb != man["next_batch"]:
+            problems.append(f"next batch saved={man['next_batch']} restored={nb}")
+        flat = flatten(restored)
+        for k, h in man["frozen"].items():
+            if hashlib.sha256(tensor_bytes(flat[f"model.{k}"])).hexdigest() != h:
+                problems.append(f"frozen tensor {k} hash differs")
+        if not all_true(not problems):
+            raise RestoreCheckError(f"step {c['step']}: " + "; ".join(problems or ["check failed on another rank"]))
+        checks_s = tc.s()
+
+        if skip:
+            loader.add_skip(skip)
+        return {"step": man["step"], "tokens": man["tokens"], "branch": c["branch"], "from_path": rel,
+                "resharded": resharded, "saved_world": man["world_size"], "world": world(),
+                "env_override": sorted(diff) if diff else [], "skip": skip,
+                "probe_recorded": probe_saved is not None, "store": st.kind,
+                "verify_s": verify_s, "download_s": download_s, "load_s": load_s, "checks_s": checks_s,
+                "restore_s": t.s()}
+
+
+# ----------------------------------------------------------------------------- retention (own IAM role)
+
+def run_retention(remote_run: str, keep: int = 3, protect_every: int = 0, dry_run: bool = False,
+                  orphan_age_s: float = 3600.0) -> dict:
+    """Delete old checkpoints from S3, never a protected one.
+
+    In simple words: S3 storage costs money every month, so we keep only the newest few checkpoints,
+    plus the ones that must never be lost (every N-th for evaluation, the final one, pinned ones, and
+    whatever `latest.json` points to). On AWS this runs as its own job with the only IAM role that may
+    delete; the training job cannot delete anything.
+    """
+    st = open_store(remote_run)
+    commits = []
+    if st.exists("commits.jsonl"):
+        commits = [json.loads(line) for line in st.get_text("commits.jsonl").splitlines() if line.strip()]
+    pins = set(st.get_json("pins.json")) if st.exists("pins.json") else set()
+    latest = st.get_json("latest.json")["path"] if st.exists("latest.json") else None
+    protected = {c["path"] for i, c in enumerate(commits)
+                 if (protect_every and (i + 1) % protect_every == 0) or c["reason"] == "final"
+                 or c["step"] in pins}
+    if latest:
+        protected.add(latest)
+    newest = {c["path"] for c in commits[-keep:]}
+    committed = {c["path"] for c in commits}
+    dirs = {}
+    for o in st.list(""):
+        parts = o["key"].split("/")
+        if len(parts) >= 3 and parts[1].startswith("step_"):
+            d = dirs.setdefault(f"{parts[0]}/{parts[1]}", {"size": 0, "mtime": 0, "manifest": False})
+            d["size"] += o["size"]
+            d["mtime"] = max(d["mtime"], o["mtime"])
+            d["manifest"] |= parts[-1] == MANIFEST
+    deleted, orphans, freed = [], [], 0
+    for rel in sorted(dirs):
+        d = dirs[rel]
+        if rel in protected or rel in newest:
+            continue
+        if rel not in committed and not d["manifest"]:
+            if time.time() - d["mtime"] < orphan_age_s:
+                continue  # maybe a save still in flight
+            orphans.append(rel)
+        else:
+            deleted.append(rel)
+        freed += d["size"]
+        if not dry_run:
+            st.delete_prefix(rel)
+    out = {"deleted": deleted, "orphans": orphans, "protected": sorted(protected), "freed_bytes": freed,
+           "kept": sorted(newest | protected), "store": st.kind}
+    emit("checkpoint.retention", **{k: v for k, v in out.items() if k != "kept"}, dry_run=dry_run)
+    return out
+
+
+# ----------------------------------------------------------------------------- export for other teams
+
+def export_safetensors(remote_run: str, model_factory, probe_fn, out_path: str, step: int = None) -> dict:
+    """dcp -> safetensors for Teams 09/11/12, with the same strict-key and probe-loss checks.
+
+    In simple words: other teams get one plain file format that any tool can read, and we prove the
+    exported weights give exactly the same probe loss as the checkpoint.
+    """
+    import tempfile
+
+    from safetensors.torch import load_file, save_file
+
+    root, run_id = remote_run.rstrip("/").rsplit("/", 1)
+    ck = Checkpointer(run_id, local_root=tempfile.mkdtemp(), remote_root=root)
+    c = ck.candidates(step)[0]
+    man = ck.store.get_json(f"{c['path']}/{MANIFEST}")
+    local_dir = os.path.join(ck.local_run, "export", c["path"])
+    for n, s in man["files"].items():
+        sha, _ = ck.store.get_file(f"{c['path']}/{n}", os.path.join(local_dir, n))
+        if sha != s["sha256"]:
+            raise IntegrityError(f"export: {n} is damaged")
+    model = model_factory()
+    target = {"model": model.state_dict()}
+    want = {k: v for k, v in man["keys"].items() if k.startswith("model.")}
+    have = key_spec(target)
+    if want != have:
+        raise StrictLoadError(f"export key mismatch: missing={sorted(set(want) - set(have))} "
+                              f"extra={sorted(set(have) - set(want))}")
+    dcp.load(target, checkpoint_id=local_dir)
+    model.load_state_dict(target["model"], strict=True)
+    save_file({k: v.contiguous() for k, v in model.state_dict().items()}, out_path,
+              metadata={"run_id": man["run_id"], "step": str(man["step"]), "state_digest": man["state_digest"]})
+    shutil.rmtree(ck.local_run, ignore_errors=True)
+    fresh = model_factory()
+    fresh.load_state_dict(load_file(out_path), strict=True)
+    bits = float_bits(probe_fn(fresh))
+    saved = man["probe_loss"].get(device_class(fresh))
+    ok = saved is None or bits == saved
+    emit("export.done" if ok else "export.failed", step=man["step"], path=out_path, probe_equal=ok)
+    if not ok:
+        raise RestoreCheckError(f"export probe loss bits differ: saved={saved} exported={bits}")
+    return {"step": man["step"], "path": out_path, "probe_bits": bits}
+
+
+# ----------------------------------------------------------------------------- CLI
+
+def main():
+    ap = argparse.ArgumentParser(description="V5 checkpoint tools")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    v = sub.add_parser("verify", help="check every file of a committed checkpoint against its manifest")
+    v.add_argument("--run", required=True, help="<remote_root>/<run_id>: a folder or s3://bucket/prefix/run")
+    v.add_argument("--step", type=int)
+    r = sub.add_parser("retention", help="delete old, unprotected checkpoints")
+    r.add_argument("--run", required=True)
+    r.add_argument("--keep", type=int, default=3)
+    r.add_argument("--protect-every", type=int, default=0)
+    r.add_argument("--dry-run", action="store_true")
+    ls = sub.add_parser("list", help="list committed checkpoints")
+    ls.add_argument("--run", required=True)
+    p = sub.add_parser("pin", help="protect a step from retention")
+    p.add_argument("--run", required=True)
+    p.add_argument("--step", type=int, required=True)
+    a = ap.parse_args()
+
+    if a.cmd == "retention":
+        print(json.dumps(run_retention(a.run, a.keep, a.protect_every, a.dry_run), indent=1))
+        return 0
+    root, run_id = a.run.rstrip("/").rsplit("/", 1)
+    ck = Checkpointer(run_id, local_root="/tmp", remote_root=root)
+    if a.cmd == "list":
+        for c in ck.commits():
+            print(json.dumps(c))
+        return 0
+    if a.cmd == "pin":
+        pins = ck.store.get_json("pins.json") if ck.store.exists("pins.json") else []
+        ck.store.put_json("pins.json", sorted(set(pins) | {a.step}))
+        return 0
+    c = ck.candidates(a.step)[0]
+    man = ck.store.get_json(f"{c['path']}/{MANIFEST}")
+    bad = [n for n, s in man["files"].items() if ck.store.sha256(f"{c['path']}/{n}") != s["sha256"]]
+    print(json.dumps({"step": c["step"], "path": c["path"], "files": len(man["files"]), "bad": bad}))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

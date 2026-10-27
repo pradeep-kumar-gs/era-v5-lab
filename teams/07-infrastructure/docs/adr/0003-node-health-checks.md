@@ -1,13 +1,21 @@
-# ADR 0003: Node health checks — JSON report, skip-not-fail, drain on hard faults
+# ADR 0003: Node health checks and hang policy
 
 - Status: Proposed
-- Date: 2026-10-25
-- Area: Health (`health/launch.sh`, `health/gpu_health.sh`, `health/xid_scan.py`)
+- Date: 2026-10-27 (revised from 2026-10-25; second revision after the week-1 review, see [review_week1.md](../review_week1.md))
+- Area: Health (`health/health_check.py`, `health/xid_scan.py`, `health/allreduce_test.py`,
+  `health/slurm_actions.py`, `health/thresholds.yaml`, `slurm/healthcheck.sh`, `slurm/prolog.sh`), hang and
+  straggler policy (`trainer/train.py`)
+- Related: ADR 0001 (exit codes), ADR 0002 (drain, events, incident records), ADR 0004 (cost, metrics)
+
+> **In simple words.** Most interruptions in big training runs come from broken hardware. A broken GPU
+> either crashes the job (we pay for the restart and the lost work) or quietly slows everyone down (we pay
+> for every slow hour). So we check every node before it gets a job and every 30 seconds after. A bad node
+> is taken out, its job saves and moves to a healthy node, and a frozen job is restarted instead of
+> sitting there burning money.
 
 ## Context
 
-Most interruptions in a large run come from the machine, not the model. Llama 3's 419 unexpected interruptions
-were:
+Llama 3's 419 unexpected interruptions were:
 
 | Cause | Share |
 |---|---|
@@ -15,132 +23,200 @@ were:
 | GPU memory (HBM) | 17.2% |
 | Software | 12.9% |
 | Network | 8.4% |
+| Host maintenance | 7.6% |
 | Other (NIC, SRAM, NCCL timeouts, power) | 22.4% |
 | Silent data corruption | 1.4% |
 
-The Session 15 reference run had 10 of 38 interruptions from GPU or node hardware.
+The S15 reference run had 10 of 38 interruptions from GPU or node hardware, 9 from slow storage and 2 from the network.
 
-Session 15 names the tools: DCGM health and Xid alerts, `dcgmi diag` before the run, the NCCL flight recorder
-for hangs, and per-GPU step timing for stragglers. Its alert table says: **Xid 79, 94 or 95, or an ECC error →
-page, remove the node.**
+Session 15 names four tools: DCGM health and Xid alerts; `dcgmi diag` before the run; the PyTorch **NCCL flight
+recorder** for hangs; **per-GPU step timing** for stragglers. Its alert table: Xid 79, 94 or 95, or an ECC error
+→ page, remove the node. PyTorch aborts a collective after 10 min with no progress.
 
-V4's repository has **no GPU health check at all**: no nvidia-smi parsing, no Xid scan, no NCCL test. Its
-monitoring watched loss and CPU idle.
-
-The scripts must also run where tools are missing: a laptop (no GPU), Colab or Kaggle (no DCGM, no `dmesg`
-access), and the real node.
+V4's repository has **no GPU health check at all**. The scripts must run on a laptop (no GPU), on Colab or Kaggle
+(no DCGM, no `dmesg`), in the Docker Slurm test, and on the real node.
 
 ## Decision drivers
 
 1. Catch a bad node **before** it joins a job, and while a job runs.
-2. Machine-readable output that the queue (ADR 0002) and Monitoring (Team 8) can consume.
-3. Never crash, and never claim "pass", because a tool is absent.
-4. Fast enough to run in a Slurm prolog: seconds, not minutes.
-5. One set of scripts from laptop to cluster.
+2. Turn a hang into a fast restart instead of a 10-minute (or endless) wait.
+3. Machine-readable output for the queue (ADR 0002) and Monitoring (Team 08).
+4. Never crash, and never claim "pass", because a tool is absent.
+5. Prolog-fast: seconds, not minutes.
+6. Measured: detection time, false drains and misses are numbers.
 
 ## Options considered
 
 | Option | For | Against |
 |---|---|---|
-| A. DCGM only (`dcgmi health`, `dcgmi diag`) | NVIDIA's own; deep diagnostics | not on Colab, Kaggle or laptops; `diag -r 3` takes minutes; no NCCL multi-node test |
-| B. A ready-made stack (e.g. a Kubernetes node-problem-detector or a vendor health agent) | less code | we are not on Kubernetes (ADR 0002); hides what is checked |
-| C. **Our own small scripts that wrap nvidia-smi, DCGM if present, kernel-log Xid scan and an NCCL all-reduce, with one JSON schema** | runs everywhere; each check visible and testable; DCGM is used when present | we maintain the Xid table and thresholds |
+| A. DCGM only (`dcgmi health`, `dcgmi diag`) | NVIDIA's own; deep | absent on laptop, Colab, Kaggle and Docker; `diag -r 3` takes minutes; no NCCL test |
+| B. A ready-made Kubernetes health agent | less code | we are not on Kubernetes (ADR 0002); hides what is checked |
+| C. **Our own small Python checks wrapping nvidia-smi, DCGM if present, a kernel-log Xid scan and an all-reduce test, with one JSON schema, plus runtime rules for hangs and stragglers** | runs everywhere; each check visible and testable | we maintain the Xid table and thresholds |
+
+> **In simple words.** We write small checks ourselves (C), so the same code runs on a laptop and on the
+> real cluster, and everyone can see exactly what is checked.
 
 ## Decision
 
-**C. Three scripts and one JSON contract.**
+**C.**
 
-**`gpu_health.sh`: per-node checks.** One JSON object, written to stdout and to a file:
+### 1. Pre-job and periodic checks (`health/health_check.py`)
 
-- driver and CUDA versions, and the GPU count against the expected count;
-- per GPU, from `nvidia-smi -q`/`--query-gpu`:
-  - temperature;
-  - power;
-  - **ECC volatile and aggregate uncorrectable errors**;
-  - retired or remapped rows pending or failed;
-  - clocks and throttle reasons;
-  - PCIe link width and generation;
-- NVLink status (`nvidia-smi nvlink -s`) where present;
-- `dcgmi diag -r 1` (quick) when `dcgmi` exists. Level 2 and 3 run only on demand.
+- Driver and CUDA versions; GPU count against the expected count (`thresholds.yaml: expect_gpus`).
+- Per GPU, from `nvidia-smi`: temperature; **ECC uncorrectable** (volatile and aggregate) and the correctable
+  count (kept for a trend); hardware-slowdown throttle; PCIe link width against max.
+- Row remapping: pending (warn: reset needed) and failure (fail: replace the GPU).
+- `dcgmi diag -r 1` on GPU nodes in prolog/periodic mode when `dcgmi` exists; level 2 in `--mode full`.
+- **Xid scan** (`health/xid_scan.py`): reads `journalctl -k` or `dmesg`, parses `NVRM: Xid (PCI:…): <code>`:
 
-**`xid_scan.py`: kernel-log Xid scan.**
+| Class | Codes |
+|---|---|
+| **fatal → drain** | 48, 63/64, 74, **79**, **94/95**, 119/120 |
+| **warn** | 13, 31, 43 |
+| unknown | reported as warn, never ignored |
 
-- Reads `dmesg` or `journalctl -k`, or a file given as an argument (used for tests and on hosts without access).
-- Parses `NVRM: Xid (PCI:…): <code>` lines and classifies each code from a table:
-  - **fatal → drain:** 48 (double-bit ECC), 63/64 (row remap), 74 (NVLink), **79** (fell off the bus),
-    **94/95** (contained/uncontained ECC), 119/120 (GSP);
-  - **warn:** 13, 31, 43 (usually an application fault);
-  - unknown codes are reported as warn.
-- Reports counts per GPU and per code since boot or since a given time.
+- **De-duplication:** a hash of every Xid line already seen is stored per node, so an old Xid does not drain a
+  repaired node again.
+- Clock offset (chrony), free NVMe (ADR 0001 §2), available host memory.
+- **All-reduce test** (`health/allreduce_test.py`, `--mode full`): each rank fills an **integer-valued fp32**
+  tensor with `rank + 1`, so the sum `n(n+1)/2` is exact in any reduction order; a wrong value means a fault,
+  not rounding. 5 warm-up and 20 timed iterations, 1 MB to 1 GB. Reports algbw and
+  **busbw = algbw × 2(n−1)/n** (the nccl-tests convention). Fails on a wrong value, a timeout, or busbw below the
+  floor. Without GPUs it uses gloo and says `backend: gloo`.
 
-**NCCL all-reduce test** (run from `launch.sh`):
+| Mode | Use | Budget |
+|---|---|---|
+| `--mode prolog` | quick checks before every job | ≤ 30 s |
+| `--mode periodic` | Slurm `HealthCheckProgram`; drains and moves jobs on `fail` | ≤ 30 s |
+| `--mode full` | adds DCGM diag 2 and the all-reduce sweep, before dry runs and after a repair | ≤ 15 min |
+| `--report-only` | report, take no action | — |
 
-- Uses `torch.distributed` across all local GPUs (and across nodes when given).
-- Checks **correctness**: the reduced sum equals the expected value exactly.
-- Reports algbw and **busbw** = algbw × 2(n−1)/n for sizes 1 MB to 256 MB.
-- If `nccl-tests` `all_reduce_perf` is installed, it runs that too.
-- Fails on a wrong result, a timeout, or busbw below a configured floor. The floor is set from the week-2
-  baseline.
-- With no GPU it falls back to gloo on CPU, which proves the code path and is marked as such.
-
-**`launch.sh`: the entry point.**
-
-- Runs the checks in order, merges them into one report, and prints a verdict.
-- Starts the given training command only if the verdict is not `fail`.
-- Modes: `--prolog` (quick checks, for Slurm), `--full` (adds DCGM diag and the NCCL sweep, before a dry run),
-  `--report-only`.
-
-**JSON contract** (shared by all three scripts):
+**JSON contract** (also emitted as the `health.report` event, ADR 0002 §8):
 
 ```json
 {
-  "schema": "v5-health/1", "host": "...", "time": "ISO-8601", "mode": "prolog|full",
-  "checks": [
-    {"name": "ecc_uncorrectable", "status": "pass|warn|fail|skipped",
-     "detail": "...", "metrics": {}, "gpu": 0}
-  ],
-  "verdict": "pass|warn|fail",
-  "drain_reason": null
+  "schema": "v5-health/1", "time": "UTC ISO-8601", "host": "...", "mode": "prolog|periodic|full",
+  "checks": [{"name": "ecc_uncorrectable", "status": "pass|warn|fail|skipped",
+              "required": true, "detail": "...", "metrics": {}, "gpu": 0, "seconds": 0.0}],
+  "verdict": "pass|warn|fail", "drain_reason": null, "runtime_seconds": 0.0
 }
 ```
 
-- A missing tool gives **`skipped`** with the reason (e.g. `"nvidia-smi not found"`). `skipped` never turns
-  into `pass` or `fail`.
-- Verdict rule: any `fail` gives `fail`. Otherwise, any `warn`, or a skipped check that is *required* for the
-  mode, gives `warn`. Otherwise `pass`. On a GPU node, a skipped GPU check is required, so a GPU node where
-  nvidia-smi is missing is not silently healthy.
-- Exit codes: 0 pass, 1 warn, 2 fail. Slurm drains the node on 2, using `drain_reason` as the reason string.
+- A missing tool gives `skipped` with the reason. `skipped` never turns into `pass` or `fail`.
+- **Verdict:** any `fail` → `fail`. Otherwise any `warn`, or any `skipped` check marked `required` (GPU checks
+  on a GPU node), → `warn`. Otherwise `pass`.
+
+**Exit codes**, aligned with ADR 0001:
+
+- The health CLI uses `0` pass, `3` warn, `4` fail. Codes `1`, `75` and `78` are left to training jobs.
+- **In prolog mode a `warn` exits 0**, because Slurm drains any node whose prolog exits non-zero. Only `fail`
+  exits non-zero there. (The first draft returned 3 for warn, which would have drained healthy nodes.)
+- **Periodic mode drains by itself**: Slurm ignores `HealthCheckProgram`'s exit code, so on `fail` the check
+  runs `scontrol update state=drain reason=v5:<checks>` and sends SIGUSR1 to the jobs on the node. They save and
+  exit 75, and Slurm restarts them on a healthy node (`health/slurm_actions.py`).
+
+> **In simple words.** "Drain" means "no new work for this node". The job already there is asked to save
+> first, so moving it costs seconds, not the work since the last checkpoint.
+
+### 2. Hang and failure policy (runtime)
+
+| Setting | Value | Why |
+|---|---|---|
+| `TORCH_NCCL_ASYNC_ERROR_HANDLING` | `1` (abort the communicator, raise) | a NCCL error stops the process instead of hanging; the wrapper retries it (ADR 0001 §6) |
+| NCCL collective timeout | **10 min** for dry run 1; then **3 × the longest collective measured** in the dry runs, but no lower than the checkpoint and restore collectives need | the PyTorch default, tightened from data |
+| `TORCH_NCCL_TRACE_BUFFER_SIZE` | `2000` | NCCL **flight recorder**: the last collectives per rank |
+| `TORCH_NCCL_DUMP_ON_TIMEOUT` | `1` | on a timeout, dump the trace that shows which rank stopped (S15) |
+| **Step watchdog** | no step completes in `WATCHDOG_S` (production: `max(5 × p99 step time, 10 min)`) → dump all Python stacks → exit **75** | a hang without a NCCL error (data wait, deadlock, a frozen rank) becomes a restart |
+| **Straggler rule** | per-rank compute time ÷ median over the last 100 steps > **1.1** → warn; in 3 windows → drain at the next checkpoint, then exit 75 | S15: one slow GPU slows all GPUs. Needs per-rank compute time from the training loop (Team 05/06) |
+| **Loss-spike guard** | loss > 1.5 × median of the last 100 steps for 3 steps → no save, exit **78** (ADR 0001 §6) | divergence without NaN is invisible to the NaN check |
+| **Alert delivery** | `metrics/watch.py` raises alerts live; Team 08's pager delivers them; Team 07 owns the node action (drain, swap) | one owner per action |
+
+**Silent data corruption:** not covered in V5's first main run. It needs step replay on a second GPU (S15;
+Gemini replayed about 0.25% of steps). Recorded as a known gap and revisited after dry run 2.
+
+### 3. Coverage map
+
+| Failure class (Llama 3 share) | Caught by |
+|---|---|
+| Faulty GPU (30.1%) | Xid scan, DCGM diag, ECC, GPU count, step watchdog |
+| HBM (17.2%) | ECC uncorrectable and correctable trend, row remap, Xid 48/63/64/94/95 |
+| Network (8.4%) | all-reduce test (busbw floor), flight recorder, NCCL async error handling |
+| Software (12.9%) | step watchdog, exit codes, crash-loop cap, loss-spike guard; not prevented |
+| Host maintenance (7.6%) | spot / scheduled-event watcher → drain + emergency save (ADR 0002 §5) |
+| Storage (S15: 9 of 38) | **not by health checks**: data-wait metric (Q-M9) and checkpoint throughput (CK-11) |
+| Silent data corruption (1.4%) | **not covered** (above) |
+
+### 4. Thresholds (`health/thresholds.yaml`)
+
+- Every threshold lives in one file, with its source.
+- Until the week-2 baseline exists, thresholds are vendor limits (temperature, power) or `warn` only.
+- **Baseline method:** at least 5 `--mode full` runs on known-good nodes.
+  - busbw floor = **0.9 × the median** per message size;
+  - temperature warn = the vendor slowdown temperature − 5 °C;
+  - correctable ECC: warn when the 24 h count exceeds 3 × the fleet median.
+
+## Metrics
+
+All health metrics with LOW / MEDIUM / HIGH thresholds are H-01 … H-24 in `metrics/catalog.yaml`
+([metrics_catalog.md](../metrics_catalog.md)). The ones that page immediately (HIGH):
+
+| ID | Metric | HIGH when |
+|---|---|---|
+| H-01 | Fatal Xid | any |
+| H-03 | ECC uncorrectable | any |
+| H-06 | Row remap failure | any |
+| H-07 | GPU missing | any |
+| H-08 | GPU at its slowdown temperature | 0 °C margin |
+| H-11 | NVLink / EFA link down | any |
+| H-12 | All-reduce busbw | ≤ 0.7 × baseline |
+| H-13 | All-reduce wrong sum | any |
+| H-14 | Step watchdog | ≥ 2 per hour |
+| H-15 | Straggler ratio | ≥ 1.25 |
+| H-16 | NCCL timeouts | ≥ 2 per hour |
+| H-21 | Spot interruption notice | any (automatic save; page if no commit in 90 s) |
+| H-22 | DCGM diag failure | any |
+| H-23 | Host memory for staging | ≤ 1.0 × need |
+| H-24 | Loss-spike guard trip | any |
+
+Targets: detection ≤ 1 health interval for Xid/ECC, ≤ the watchdog limit for hangs; false drains ≤ 1 per week;
+prolog ≤ 30 s; full ≤ 15 min.
 
 ## Consequences
 
 Good:
 
-- Bad GPUs are removed before they cost a restart.
-- Monitoring gets the same JSON from every node.
-- The scripts run and are tested on a laptop, Kaggle and the real node.
+- Bad GPUs are removed before they cost a restart, and their jobs move after saving.
+- Hangs become restarts in minutes.
+- Every node reports the same JSON; detection and miss rates are measured.
+- The scripts run on a laptop, Kaggle, Docker Slurm and the cluster.
 
 Bad and accepted:
 
-- **A healthy node is not a correct GPU:** these checks do not detect silent data corruption. That needs
-  step replay on another GPU (Session 15), which is a later ADR.
-- **The Xid table needs care:** it must be kept current with NVIDIA's list, and the thresholds (temperature,
-  busbw floor) need the week-2 baseline before they mean anything.
-- **Root may be needed:** `dmesg` can require root, so on the cluster `xid_scan.py` runs from the Slurm prolog
-  as root, or reads `journalctl` through a group.
+- Silent data corruption and storage slowness are not caught here (§3).
+- The Xid table and thresholds need upkeep.
+- `dmesg` may need root, so on the cluster the scan runs in the root prolog and health check.
+- The straggler rule and the step watchdog need per-rank timing from the training loop (Teams 05/06).
+- A tight NCCL timeout risks killing a slow but healthy save or restore; hence the measured floor in §2.
 
 ## Validation
 
-- **Mac:** every GPU check reports `skipped`, the verdict is `warn`, and the JSON is valid against the schema.
-  The NCCL test runs the gloo path on 2 CPU processes.
-- **Fixture logs:** `xid_scan.py` on saved kernel-log samples (Xid 79, 94, 13 and an unknown code) gives the
-  expected classes. These are unit tests.
-- **Kaggle 2×T4:** real nvidia-smi values, plus a 2-rank NCCL all-reduce with a correct result and measured
-  busbw.
-- **Week-2 node:** the full mode, including DCGM diag; this sets the baseline thresholds.
-- **Slurm Docker:** a forced `fail` drains the node (ADR 0002).
+| Where | Test | Result |
+|---|---|---|
+| `health/test_health.py` (Docker image) | Xid fixture (13, 79, 94, unknown 157): expected classes; the same log again gives no second drain | pass |
+| same | nvidia-smi fixture: ECC uncorrectable → fail, hot + throttled → warn, x8 of x16 → warn | pass |
+| same | no nvidia-smi on a GPU node → `skipped`, required → verdict `warn` (never pass); on a CPU node → pass | pass |
+| same | prolog warn exits 0; periodic warn exits 3; forced fail exits 4 with drain reason; JSON keys match the schema | pass |
+| same | all-reduce on gloo with 2 ranks: exact sums, busbw > 0 | pass |
+| Docker Slurm (`sim/run_sim.py`) | forced `fail` on a main-run node: periodic check drains it, job saves, exits 75 and moves to the spare | pass: detect 26 s, 0 steps lost, MTTR 31 s ([sim_results.md](../sim_results.md)) |
+| Docker Slurm | forced `fail` on **both** main-run nodes with one spare: both drained, main run waits (no crash loop), recovers when they return | see [sim_results.md](../sim_results.md) |
+| Docker Slurm | `SIGSTOP` on one rank: the watchdog on the other ranks exits 75 with a stack dump; job restarts | pass: watchdog at 20 s, MTTR 24 s ([sim_results.md](../sim_results.md)) |
+| Kaggle 2×T4 (`kaggle/run_gpu_checks.py`) | real nvidia-smi values; 2-rank NCCL all-reduce with exact sums and measured busbw; a stuck rank fails cleanly after the NCCL timeout with a flight-recorder trace (`health/nccl_timeout_test.py`) | ready, to run (results go in `kaggle/results/`) |
+| Week-2 node | `--mode full` five times gives the baseline thresholds | week 2 |
 
 ## Open points
 
-- Who receives a page, and how (Team 8 owns alerting)?
+- The on-call rota: who acts at 4 a.m.?
 - Should a `warn` node stay in the main-run pool?
-- How often does `HealthCheckInterval` run during the main run, and what does it cost in step time?
+- `HealthCheckInterval` during the main run, and its measured cost in step time.
+- Whether V5 adds step replay for silent data corruption after dry run 2.
+- Kaggle results (`kaggle/run_gpu_checks.py`): real nvidia-smi parsing on T4 and the NCCL timeout test.
