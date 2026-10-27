@@ -1,6 +1,6 @@
 {
- "duration_s": 934,
- "passed": 29,
+ "duration_s": 1263,
+ "passed": 30,
  "total": 30,
  "drills": [
   {
@@ -22,8 +22,8 @@
   },
   {
    "drill": "gpu_allocation",
-   "pass": false,
-   "main_run_alloc": null,
+   "pass": true,
+   "main_run_alloc": "cpu=8,node=2,billing=8,gres/gpu=4",
    "over_ask_rejected": "sbatch: error: Batch job submission failed: Requested node configuration is not available"
   },
   {
@@ -37,56 +37,56 @@
    "drill": "kill_process_1",
    "pass": true,
    "node": "c2",
-   "restored_step": 4831,
-   "lost_steps": 109
+   "restored_step": 1955,
+   "lost_steps": 45
   },
   {
    "drill": "kill_process_2",
    "pass": true,
    "node": "c2",
-   "restored_step": 4961,
-   "lost_steps": 9
+   "restored_step": 2085,
+   "lost_steps": 25
   },
   {
    "drill": "kill_process_3",
    "pass": true,
    "node": "c2",
-   "restored_step": 5091,
-   "lost_steps": 19
+   "restored_step": 2216,
+   "lost_steps": 24
   },
   {
    "drill": "sigusr1_save_and_requeue_1",
    "pass": true,
-   "saved_step": 5112,
-   "restored_step": 5112,
+   "saved_step": 2263,
+   "restored_step": 2263,
    "lost_steps": 0
   },
   {
    "drill": "sigusr1_save_and_requeue_2",
    "pass": true,
-   "saved_step": 5133,
-   "restored_step": 5133,
+   "saved_step": 2294,
+   "restored_step": 2294,
    "lost_steps": 0
   },
   {
    "drill": "sigusr1_save_and_requeue_3",
    "pass": true,
-   "saved_step": 5169,
-   "restored_step": 5169,
+   "saved_step": 2318,
+   "restored_step": 2318,
    "lost_steps": 0
   },
   {
    "drill": "kill_during_save",
    "pass": true,
-   "inflight_step": 5430,
-   "restored_step": 5299,
-   "previous_latest": 5299
+   "inflight_step": 2580,
+   "restored_step": 2449,
+   "previous_latest": 2449
   },
   {
    "drill": "kill_during_restore",
    "pass": true,
-   "restore_interrupted_at": 5430,
-   "restored_step": 5430,
+   "restore_interrupted_at": 2580,
+   "restored_step": 2580,
    "restore_failures": 0
   },
   {
@@ -118,17 +118,17 @@
     "c2",
     "c3"
    ],
-   "pending_reason": "partitions",
-   "waited_s": 57,
-   "restored_step": 6400
+   "pending_reason": "BeginTime",
+   "waited_s": 55,
+   "restored_step": 3496
   },
   {
    "drill": "hang_watchdog",
    "pass": true,
-   "node": "c3",
-   "watchdog_idle_s": 20.6,
-   "restored_step": 6400,
-   "lost_steps": 20
+   "node": "c2",
+   "watchdog_idle_s": 20.21,
+   "restored_step": 3496,
+   "lost_steps": 44
   },
   {
    "drill": "node_loss",
@@ -138,36 +138,36 @@
     "c1",
     "c2"
    ],
-   "lost_steps": 30
+   "lost_steps": 24
   },
   {
    "drill": "controller_failover",
    "pass": true,
-   "takeover_s": 82.1,
+   "takeover_s": 81.9,
    "job_via_backup": "8",
    "main_run_state_after": "RUNNING"
   },
   {
    "drill": "db_backup_restore",
    "pass": true,
-   "file": "slurm_acct_db-20261027T180153Z.sql.gz",
-   "bytes": 15001,
+   "file": "slurm_acct_db-20261027T190013Z.sql.gz",
+   "bytes": 16884,
    "tables": 31,
    "tables_restored": 31,
-   "job_rows_restored": 34
+   "job_rows_restored": 44
   },
   {
    "drill": "nan_guard_hold",
    "pass": true,
-   "nan_at_step": 8615,
-   "latest_committed": 8524,
+   "nan_at_step": 5865,
+   "latest_committed": 5732,
    "job_state": "SPECIAL_EXIT",
    "reason": "JobHeldUser"
   },
   {
    "drill": "rollback_skip_branch",
    "pass": true,
-   "restored_step": 8524,
+   "restored_step": 5732,
    "branch": "b1"
   },
   {
@@ -179,13 +179,13 @@
   {
    "drill": "loss_spike_hold",
    "pass": true,
-   "spike_at_step": 8670,
-   "latest_committed": 8651
+   "spike_at_step": 5880,
+   "latest_committed": 5861
   },
   {
    "drill": "main_run_completes",
    "pass": true,
-   "final_step": 8711,
+   "final_step": 5921,
    "job": "10"
   },
   {
@@ -199,8 +199,8 @@
    "arch": [
     "arch",
     "",
-    "843",
-    "0.372158"
+    "1535",
+    "0.443199"
    ],
    "posttrain": [
     "posttrain",
@@ -213,24 +213,24 @@
    "drill": "gpu_hours_accounting",
    "pass": true,
    "gpu_minutes_by_account": {
-    "arch": 5.8,
-    "mainrun": 10.3,
-    "perf": 3.7,
-    "eval": 3.7
+    "eval": 7.2,
+    "perf": 2.5,
+    "arch": 0.6,
+    "mainrun": 0.2
    }
   },
   {
    "drill": "retention",
    "pass": true,
-   "deleted": 56,
-   "protected": 15,
-   "freed_bytes": 66647622,
+   "deleted": 38,
+   "protected": 10,
+   "freed_bytes": 45221253,
    "store": "s3"
   },
   {
    "drill": "export_safetensors",
    "pass": true,
-   "step": 8711
+   "step": 5921
   },
   {
    "drill": "live_alerts",
@@ -241,14 +241,13 @@
     "C-04",
     "CK-07",
     "H-14",
-    "H-15",
     "H-21",
     "H-24",
     "Q-02",
     "Q-05",
     "Q-19"
    ],
-   "total_fired": 27
+   "total_fired": 23
   }
  ]
 }

@@ -288,7 +288,7 @@ All queue metrics with LOW / MEDIUM / HIGH thresholds are Q-01 … Q-21 in `metr
 | Q-19 | Goodput | ≤ 80% |
 | Q-20 | MTTR | ≥ 60 min |
 
-Targets: goodput ≥ 90%, MTTR ≤ 15 min, reschedule ≤ 2 min with the spare, node replacement ≤ 5 min,
+Targets: goodput ≥ 90%, MTTR ≤ 15 min, reschedule ≤ 2 min with the spare (measured ≈ 50 s), node replacement ≤ 5 min,
 human interventions ≈ 0 (Llama 3: 3 of 466).
 
 ## Consequences
@@ -315,20 +315,25 @@ Bad and accepted:
 production `slurm.conf`, runs every drill in §10, then `metrics/evaluate.py`. Results are in
 `sim/results/` (`drills.json`, `report.md`, `metrics.json`, `alerts.json`); see [sim_results.md](../sim_results.md).
 
-**Result (2026-10-27): 17 of 17 drills pass in 10 minutes.** Measured per incident (2 nodes × 2 ranks, tiny model):
+**Result (run 8, 2026-10-28): 30 of 30 drills pass in 21 minutes.** MTTR per fault type (2 nodes × 2 ranks,
+tiny model, checkpoints on the S3 emulator):
 
-| Drill | Detect | Reschedule | Restore | MTTR | Steps lost |
-|---|---|---|---|---|---|
-| kill -9 | 0.2 s | 4.7 s | 1.2 s | 6 s | 92 (since last commit) |
-| SIGUSR1 | 0.4 s | 1.1 s | 1.3 s | 3 s | 0 (emergency save) |
-| spot notice | 5.3 s | 40 s (spare freed by preempting its team job) | 1.3 s | 47 s | 0 |
-| health fail | 26 s (health interval 30 s) | 3.1 s | 1.7 s | 31 s | 0 |
-| hang (SIGSTOP) | 21 s (watchdog 20 s) | 1.1 s | 2.0 s | 24 s | 42 |
-| node loss | 55 s (`SlurmdTimeout` 30 s + kill) | 1.4 s | 1.3 s | 57 s | 12 |
+| Drill | MTTR p50 (n) | Steps lost |
+|---|---|---|
+| kill -9 | 50 s (3) | 24–45 (since last commit) |
+| SIGUSR1 | 58 s (3) | 0 (emergency save) |
+| kill during save / during restore | 50 s / 112 s | since previous commit / 0 extra |
+| spot notice | 57 s | 0 |
+| health fail | 60 s | 0 |
+| two nodes down (after repair) | 58 s | — |
+| hang (SIGSTOP) | 56 s (watchdog 20 s) | 44 |
+| node loss | 88 s (`SlurmdTimeout` 30 s) | 24 |
+| controller failover | backup in control after 82 s; training never stopped | 0 |
 
-The first simulation run measured ≈ 121 s reschedule on every incident (Slurm's requeue `BeginTime`);
-`cred_expire=30` (§5) cuts it to ≈ 50 s. Goodput in the simulation is 63% only because a fault is injected every
-≈ 30 s of training; ADR 0004 projects the measured durations onto real failure rates.
+Most of each MTTR is Slurm's requeue wait (`cred_expire=30`, §5). Run 3 measured 3–57 s with an
+immediate-restart hack, but run 7 showed that hack can lose the main run, so it was removed. Goodput in the
+simulation is low only because a fault is injected about every minute; ADR 0004 projects the measured
+durations onto real failure rates.
 
 Differences from EC2, by design: CPU instead of GPU (gloo instead of NCCL), `proctrack/linuxproc` and
 `task/none` instead of cgroup enforcement (`cgroup.conf` uses `IgnoreSystemd=yes` because there is no

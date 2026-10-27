@@ -17,7 +17,34 @@ code runs against it), three "GPU" nodes with two placeholder GPUs each (allocat
 computation) and one eval/CPU node. The main run uses 2 nodes × 2 ranks; the third node is the hot spare. The
 tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [sim_results.md](sim_results.md).
 
-RESULTS_TABLE
+**Latest full run (run 8, 28 Oct 2026): 30 of 30 drills pass in 21 minutes.**
+
+| Fault injected | What happened | MTTR p50 (n) | Work lost |
+|---|---|---|---|
+| kill a training process | wrapper turns the crash into "retry"; requeued; restored from the last commit | 50 s (3) | 24–45 steps (since last save) |
+| preemption signal (SIGUSR1) | emergency save, exit 75, requeued | 58 s (3) | 0 |
+| kill **during** a save | the half-uploaded checkpoint is never used; previous commit restored | 50 s | since previous commit |
+| kill **during** a restore | next attempt restores the same checkpoint, no failure | 112 s | 0 extra |
+| spot notice | node drained, emergency save, job moves to the spare | 57 s | 0 |
+| fake GPU failure | health check drains within one interval; save; job moves | 60 s | 0 |
+| two nodes down, one spare | main run waits (no crash loop); recovers when nodes return | 58 s after repair | — |
+| frozen process (hang) | watchdog fires at 20 s; restart | 56 s | 44 steps |
+| node unplugged | Slurm marks it down after ~30 s; requeued on remaining nodes | 88 s | 24 steps |
+| controller stopped | backup takes over in 82 s; training never stops; new jobs accepted | — | 0 |
+| NaN, loss spike | nothing bad saved; job held; rollback on a new branch, on half the GPUs | rollback 3 s | — |
+
+Also passing: accounts (no account → rejected), preemption of team jobs (they save first), GPU allocation
+(`gres/gpu=4`, over-ask refused), crash-loop hold, DB backup + test restore (31 of 31 tables), budget limit,
+fair share, GPU-minutes per account, retention on S3 (no protected checkpoint deleted), safetensors export
+(bit-equal probe), live alerts (23 fired, including every drill-caused HIGH).
+
+**Why MTTR is ≈ 50–60 s now (it was 3–57 s in run 3):** most of it is Slurm's requeue wait. Our earlier
+"restart immediately" fix lost the main run in run 7 (see §2), so we now use Slurm's supported setting
+`cred_expire=30`. About 50 s per restart is the price of never losing the run; at 8 nodes that is ≈ $13 per
+restart (assumed prices), small next to the work lost per failure.
+
+Known reporting gap in run 8: GPU-minutes counted only the last segment of each requeued job (`sacct` without
+`-D`), so `mainrun` shows 0.2 GPU-minutes. Fixed in `sim/run_sim.py`; the next run reports full usage.
 
 How to read the goodput number in the report: the simulation injects a fault about every half minute, while a
 real run sees one every few hours to days. So "useful share of time" is low **by design of the test**. What

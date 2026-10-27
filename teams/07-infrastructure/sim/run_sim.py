@@ -481,7 +481,7 @@ def d_budget_fairshare():
     ok = arch and post and lv(arch) is not None and lv(post) is not None and lv(arch) < lv(post)
     record("fair_share", bool(ok), arch=arch, posttrain=post)
     # GPU-minutes per account from the job records (sreport's hourly roll-up is empty in a short test).
-    out = ctl("sacct -a -X -n -P -S now-1days -o account,elapsedraw,alloctres").stdout
+    out = ctl("sacct -a -X -D -n -P -S now-1days -o account,elapsedraw,alloctres").stdout   # -D: every requeue segment
     used = {}
     for line in out.splitlines():
         parts = line.split("|")
