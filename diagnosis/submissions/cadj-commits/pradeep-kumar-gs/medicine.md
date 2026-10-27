@@ -1,6 +1,6 @@
 # Medicine sheet: cadj-commits (pradeep-kumar-gs)
 
-Built from 149 labelled rows of 500 documents. One section for each disease labelled in more than 5 documents.
+Built from 151 labelled rows of 500 documents. One section for each disease labelled in more than 5 documents.
 
 ## Medicine 1: F1
 
@@ -16,7 +16,7 @@ Built from 149 labelled rows of 500 documents. One section for each disease labe
    ```
 
 3. **Action:** fix the text.
-4. **Harm test:** _not run: no gold set given (`--gold`)._ Proxy on this pack: it changes or drops 2 of the 122 documents you labelled clean.
+4. **Harm test:** _not run: no gold set given (`--gold`)._ Proxy on this pack: it changes or drops 2 of the 124 documents you labelled clean.
 5. **Side effects:**
    - Email-parsing tests lose their sample addresses.
    - Organisation addresses (a project's security or support mailbox) are replaced too.
