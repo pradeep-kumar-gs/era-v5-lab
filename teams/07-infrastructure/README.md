@@ -12,6 +12,12 @@ Open a pull request; the lead reviews and merges it. The pr-guard check must pas
 3. [docs/sim_results.md](docs/sim_results.md): every drill and its measured result.
 4. [docs/metrics_catalog.md](docs/metrics_catalog.md): all 74 metrics with LOW / MEDIUM / HIGH thresholds.
 
+To learn one area in depth (plain-language walk-throughs with diagrams, files, commands, tests and metrics):
+
+- **Checkpoint:** [ckpt/README.md](ckpt/README.md)
+- **Queue (Slurm):** [slurm/README.md](slurm/README.md), which also covers `slurm-docker/`
+- **Health:** [health/README.md](health/README.md)
+
 ## What is here
 
 | Folder | What | Decision |
