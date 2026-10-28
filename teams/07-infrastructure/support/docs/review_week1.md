@@ -18,8 +18,8 @@ computation) and one eval/CPU node. The main run uses 2 nodes × 2 ranks; the th
 tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [sim_results.md](sim_results.md).
 The kit lives in `support/simulation/` (optional; see [support/simulation/README.md](../simulation/README.md)).
 
-**Latest full run (run 9, 28 Oct 2026): 31 of 31 drills pass in 22 minutes** (run 8: 30 of 30; run 9 adds
-`held_job_explains_itself`, and runs from the reorganised folder).
+**Latest full run (run 10, 28 Oct 2026): 31 of 31 drills pass in 21 minutes**, from the `submission/` + `support/`
+layout (run 9: 31 of 31, adds `held_job_explains_itself`; run 8: 30 of 30).
 
 | Fault injected | What happened | MTTR p50 (n) | Work lost |
 |---|---|---|---|
