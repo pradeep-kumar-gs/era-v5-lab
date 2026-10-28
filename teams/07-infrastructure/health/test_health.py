@@ -71,3 +71,18 @@ def test_allreduce_exact_on_gloo(tmp_path):
     r = json.load(open(out))
     assert p.returncode == 0 and r["status"] == "pass" and r["backend"] == "gloo" and r["ranks"] == 2
     assert all(s["busbw_gbps"] > 0 for s in r["metrics"]["sizes"])
+
+
+def test_renamed_throttle_field_is_not_a_failure(monkeypatch):
+    """Newer drivers reject clocks_throttle_reasons.*; the retry with clocks_event_reasons.* must be used, not
+    reported as a broken GPU (that would drain healthy nodes)."""
+    good = "".join(f"{i}, 40, 300.0, 0, 0, 0, Not Active, 16, 16\n" for i in range(8))
+
+    def fake_run(cmd, timeout=60):
+        old = any("clocks_throttle_reasons" in c for c in cmd)
+        return subprocess.CompletedProcess(cmd, 2 if old else 0, "" if old else good, "unknown field" if old else "")
+
+    monkeypatch.setattr(health_check.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(health_check, "run", fake_run)
+    res = health_check.gpu_checks(TH, 8)
+    assert health_check.verdict(res) == "pass", res

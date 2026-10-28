@@ -28,6 +28,7 @@ export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)"
 export MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-eth0}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 TORCH_NCCL_TRACE_BUFFER_SIZE=2000 TORCH_NCCL_DUMP_ON_TIMEOUT=1
+# The trainer: V5_TRAIN_SCRIPT (Team 05's real one on EC2); default is the test trainer in simulation/trainer/.
 exec /opt/venv/bin/python /opt/v5/slurm/run_job.py -- --ntasks-per-node="$SLURM_NTASKS_PER_NODE" -- \
   --run-id "$RUN_ID" --remote-root "${V5_REMOTE_ROOT:-/s3/ckpt}" --local-root /nvme/ckpt \
   --steps "${STEPS:-100000}" --interval-s "${INTERVAL_S:-1800}" \

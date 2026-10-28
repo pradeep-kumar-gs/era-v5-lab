@@ -132,7 +132,8 @@ run is marked `<branch>-resharded-w<N>`.
   `--spike-ratio`, `--spike-steps`, `--spike-window` (tuned on dry runs). Test T12 shows 300 normal steps never
   trip it.
 
-After a 78, an operator **rolls back** (§7).
+After a 78, an operator **rolls back** (§7). The held job's Slurm comment names the cause and the next step;
+`python metrics/explain.py <cause>` explains any of them ([monitoring guide](../metrics/README.md)).
 
 ---
 
@@ -191,7 +192,7 @@ old branch stays, so the run can be replayed exactly later. You can also restart
 | `bench_save.py` | measures the real stall on a GPU: GPU-to-host copy speed, sync save, async save |
 | `test_ckpt.py` | tests T1–T13 (below) |
 
-Related: `../trainer/train.py` is a tiny trainer that follows every rule here (signals, watchdog, guards).
+Related: `../simulation/trainer/train.py` is a tiny trainer that follows every rule here (signals, watchdog, guards).
 
 ### Using the CLI
 
@@ -232,12 +233,12 @@ Run them (from `teams/07-infrastructure`):
 docker run --rm -v "$PWD":/opt/v5:ro --entrypoint bash v5-slurm-sim:1 \
   -c 'cd /opt/v5 && python -m pytest -q -p no:cacheprovider -W ignore ckpt'
 # the same tests against S3 (moto emulator): see ../README.md step 2
-# on a GPU (Kaggle): V5_DEVICE=cuda, see ../kaggle/README.md
+# on a GPU (Kaggle): V5_DEVICE=cuda, see ../simulation/kaggle/README.md
 ```
 
 Result today: all pass on the folder store and against the S3 emulator.
 
-### In the Docker Slurm simulation (run 8)
+### In the Docker Slurm simulation (run 9)
 
 | Drill | Result |
 |---|---|

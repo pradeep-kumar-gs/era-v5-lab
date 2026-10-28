@@ -21,13 +21,14 @@ from pytest import fixture
 parametrize = pytest.mark.parametrize
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.insert(0, ROOT)
+SIM = os.path.join(ROOT, "simulation")   # the tiny test trainer lives in the optional simulation kit
+sys.path[:0] = [ROOT, SIM]
 from ckpt.ckpt import (Checkpointer, StrictLoadError, export_safetensors, run_retention, run_url)  # noqa: E402
 from ckpt.store import open_store  # noqa: E402
 from common.events import read_all  # noqa: E402
 from trainer.tiny import SyntheticLoader, TinyLM, make_probe_fn  # noqa: E402
 
-TRAIN = os.path.join(ROOT, "trainer", "train.py")
+TRAIN = os.path.join(SIM, "trainer", "train.py")
 SEED = 1234
 # V5_DEVICE=cuda runs every trainer on GPU (Kaggle 2xT4, EC2). One GPU per rank, so world sizes are capped.
 DEVICE = os.environ.get("V5_DEVICE", "cpu")
@@ -145,7 +146,7 @@ def test_t5_renamed_key_strict_load(env, monkeypatch):
 
     m = Renamed()
     opt = torch.optim.AdamW(m.parameters())
-    ck = Checkpointer("s", env.local, env.remote, config_path=os.path.join(ROOT, "sim", "config_v0.yaml"))
+    ck = Checkpointer("s", env.local, env.remote, config_path=os.path.join(SIM, "config_v0.yaml"))
     with pytest.raises(StrictLoadError) as e:
         ck.restore(m, opt, SyntheticLoader(SEED, 8, 0, 1), make_probe_fn(SEED))
     assert "model.ff1.weight" in str(e.value) and "model.ff_in.weight" in str(e.value)
@@ -199,7 +200,7 @@ def test_t9_env_change_refused(env, tmp_path):
     """A different config refuses to resume (exit 78) unless --allow-env-change is given."""
     env.run("--run-id", "v", "--steps", 4, "--interval-s", 999, check=0)
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(open(os.path.join(ROOT, "sim", "config_v0.yaml")).read() + "\n# changed\n")
+    cfg.write_text(open(os.path.join(SIM, "config_v0.yaml")).read() + "\n# changed\n")
     env.run("--run-id", "v", "--steps", 6, "--config", cfg, check=78)
     env.run("--run-id", "v", "--steps", 6, "--config", cfg, "--allow-env-change", check=0)
     assert env.events_named("restore.done")[0]["env_override"] == ["config_sha256"]

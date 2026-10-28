@@ -26,13 +26,15 @@ import torch.distributed as dist
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
+# simulation/ holds the trainer package; the team folder holds ckpt/ and common/.
+sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..")]
 from ckpt.ckpt import (EXIT_DONE, EXIT_FATAL, EXIT_RETRY, Checkpointer, CheckpointError,  # noqa: E402
                        EnvMismatchError, NonFiniteError, StrictLoadError, float_bits)
 from common.events import emit  # noqa: E402
+from common.reasons import write_exit_note  # noqa: E402
 from trainer.tiny import FROZEN_KEYS, SyntheticLoader, TinyLM, lm_loss, make_probe_fn  # noqa: E402
 
-DEFAULT_CONFIG = os.path.join(HERE, "..", "sim", "config_v0.yaml")
+DEFAULT_CONFIG = os.path.join(HERE, "..", "config_v0.yaml")
 
 
 def load_config(path: str) -> dict:
@@ -86,6 +88,8 @@ class Watchdog(threading.Thread):
             if idle > self.limit_s:
                 emit("train.watchdog", step=self.step, idle_s=round(idle, 2), limit_s=self.limit_s)
                 faulthandler.dump_traceback(all_threads=True)
+                write_exit_note(EXIT_RETRY, "hang_watchdog", self.step, f"no step for {idle:.0f} s",
+                                rank=int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0"))))
                 os._exit(EXIT_RETRY)
 
 
@@ -160,6 +164,7 @@ def main(argv=None) -> int:
     except (StrictLoadError, EnvMismatchError, CheckpointError) as e:
         if rank == 0:
             emit("restore.fatal", cause=type(e).__name__, detail=str(e)[:800])
+            write_exit_note(EXIT_FATAL, type(e).__name__, None, str(e))
         print(f"FATAL restore: {e}", file=sys.stderr)
         return EXIT_FATAL
     step = info["step"] if info else 0
@@ -242,6 +247,8 @@ def main(argv=None) -> int:
                 ok = ck.wait()
                 if rank == 0:
                     emit("train.exit", step=step, code=EXIT_RETRY, committed=ok)
+                    write_exit_note(EXIT_RETRY, "saved_and_stopped", step,
+                                    f"signal {stop['sig'] or 'from a peer rank'}; checkpoint committed: {ok}")
                 return EXIT_RETRY
             if flags[0]:
                 ck.save(step, ddp, optim, loader, probe, tokens, reason="interval")
@@ -251,6 +258,8 @@ def main(argv=None) -> int:
         ok = ck.wait()
         if rank == 0:
             emit("train.exit", step=step, code=EXIT_DONE if ok else EXIT_RETRY, committed=ok)
+            write_exit_note(EXIT_DONE if ok else EXIT_RETRY, "done" if ok else "crash", step,
+                            "" if ok else "final checkpoint not committed")
         return EXIT_DONE if ok else EXIT_RETRY
     except (NonFiniteError, LossSpikeError) as e:
         print(f"FATAL: {e}", file=sys.stderr)
@@ -258,6 +267,7 @@ def main(argv=None) -> int:
         if rank == 0:
             emit("train.exit", step=step, code=EXIT_FATAL, cause=cause,
                  hint=f"rollback: TRAIN_EXTRA='--from-step <last good> --skip <N> --branch <new>'")
+            write_exit_note(EXIT_FATAL, cause, step, str(e))
         return EXIT_FATAL
     finally:
         if loss_log:

@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-27 (revised from 2026-10-25; second revision after the week-1 review, see [review_week1.md](../review_week1.md))
-- Area: Checkpoint (`ckpt/ckpt.py`, `ckpt/test_ckpt.py`, `trainer/train.py`, `docs/checkpoint_design.md`)
+- Area: Checkpoint (`ckpt/ckpt.py`, `ckpt/test_ckpt.py`, `simulation/trainer/train.py`, `docs/checkpoint_design.md`)
 - Related: ADR 0002 (queue, exit codes, events), ADR 0003 (health, hang policy), ADR 0004 (cost, metrics)
 
 > **In simple words.** Training costs money every hour. A checkpoint is a saved copy of the training, so
@@ -274,10 +274,10 @@ Simulation drills that exercise the checkpoint in Slurm (ADR 0002 §10): kill **
 checkpoint is never used), kill **during** a restore (the next attempt restores the same checkpoint cleanly),
 restore onto a smaller world, retention and export, all against the S3 emulator.
 
-The same code runs inside the Docker Slurm cluster in `sim/run_sim.py` (ADR 0002 §Validation).
+The same code runs inside the Docker Slurm cluster in `simulation/run_sim.py` (ADR 0002 §Validation).
 GPU: `V5_DEVICE=cuda` runs T1–T10 with the trainer on CUDA in deterministic mode (`CUBLAS_WORKSPACE_CONFIG` set),
 and `ckpt/bench_save.py` measures the GPU-to-host stall and `dcp.async_save` times. Both run on Kaggle 2×T4 via
-`kaggle/run_gpu_checks.py` (see `kaggle/README.md`). Week 2: the same on the B200 node for a randomly initialised
+`simulation/kaggle/run_gpu_checks.py` (see `simulation/kaggle/README.md`). Week 2: the same on the B200 node for a randomly initialised
 model of the final shape.
 
 ## Open points

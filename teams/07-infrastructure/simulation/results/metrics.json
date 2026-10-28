@@ -1,14 +1,14 @@
 {
  "CK-01": {
   "name": "Time since last committed checkpoint",
-  "value": 1.2229,
+  "value": 1.3186,
   "unit": "x interval",
   "severity": "low",
   "computed": true
  },
  "CK-02": {
   "name": "Compute dollars at risk (since last commit)",
-  "value": 0.6192,
+  "value": 0.6677,
   "unit": "USD",
   "severity": "low",
   "computed": true
@@ -28,7 +28,7 @@
   "computed": true
  },
  "CK-05": {
-  "name": "Restore check failures (digest",
+  "name": "Restore check failures (digest, probe, next batch, frozen)",
   "value": 0,
   "unit": "count",
   "severity": null,
@@ -50,14 +50,14 @@
  },
  "CK-08": {
   "name": "Save stall as share of interval",
-  "value": 0.5133,
+  "value": 0.4893,
   "unit": "%",
   "severity": null,
   "computed": true
  },
  "CK-09": {
   "name": "Commit latency (stall end to committed)",
-  "value": 0.2159,
+  "value": 0.1384,
   "unit": "s",
   "severity": null,
   "computed": true
@@ -85,16 +85,16 @@
  },
  "CK-13": {
   "name": "Restore time (job start to first productive step)",
-  "value": 62.39,
+  "value": 62.36,
   "unit": "s",
   "severity": null,
   "computed": true
  },
  "CK-14": {
   "name": "Work lost per incident",
-  "value": 0.95,
+  "value": 0.4913,
   "unit": "x interval",
-  "severity": "low",
+  "severity": null,
   "computed": true
  },
  "CK-15": {
@@ -141,7 +141,7 @@
  },
  "Q-01": {
   "name": "Main run not running (pending time)",
-  "value": 57.47,
+  "value": 60.1,
   "unit": "s",
   "severity": null,
   "computed": true
@@ -155,9 +155,9 @@
  },
  "Q-03": {
   "name": "Reschedule latency (job end to running again)",
-  "value": 57.47,
+  "value": 60.1,
   "unit": "s",
-  "severity": null,
+  "severity": "low",
   "computed": true
  },
  "Q-04": {
@@ -169,13 +169,13 @@
  },
  "Q-05": {
   "name": "Main-run interruptions per day",
-  "value": 1199.2612,
+  "value": 1142.9674,
   "unit": "count/day",
   "severity": "high",
   "computed": true
  },
  "Q-06": {
-  "name": "Idle GPU node-hours (up",
+  "name": "Idle GPU node-hours (up, no job)",
   "value": null,
   "unit": "node-h/day",
   "severity": null,
@@ -183,7 +183,7 @@
  },
  "Q-07": {
   "name": "Allocated but not stepping",
-  "value": 62.395,
+  "value": 62.362,
   "unit": "s",
   "severity": null,
   "computed": true
@@ -204,7 +204,7 @@
  },
  "Q-10": {
   "name": "Node replacement time (drain to spare running the job)",
-  "value": 56.474,
+  "value": 62.408,
   "unit": "s",
   "severity": null,
   "computed": true
@@ -267,14 +267,14 @@
  },
  "Q-19": {
   "name": "Goodput of the main run",
-  "value": 26.2904,
+  "value": 25.0182,
   "unit": "%",
   "severity": "high",
   "computed": true
  },
  "Q-20": {
   "name": "MTTR (fault to first productive step)",
-  "value": 54.6393,
+  "value": 58.9667,
   "unit": "s",
   "severity": null,
   "computed": true
@@ -379,16 +379,16 @@
  },
  "H-14": {
   "name": "Step watchdog fired (hang)",
-  "value": 2.9394,
+  "value": 2.8014,
   "unit": "count/h",
   "severity": "high",
   "computed": true
  },
  "H-15": {
   "name": "Straggler ratio (rank step time / median)",
-  "value": 1.1665,
+  "value": 353.7976,
   "unit": "ratio",
-  "severity": "medium",
+  "severity": "high",
   "computed": true
  },
  "H-16": {
@@ -463,21 +463,21 @@
  },
  "C-02": {
   "name": "Cost per productive GPU-hour vs list price",
-  "value": 3.8037,
+  "value": 3.9971,
   "unit": "ratio",
   "severity": "high",
   "computed": true
  },
  "C-03": {
   "name": "Wasted share of main-run spend",
-  "value": 73.7096,
+  "value": 74.9818,
   "unit": "%",
   "severity": "high",
   "computed": true
  },
  "C-04": {
   "name": "Cost of one incident",
-  "value": 14.0625,
+  "value": 13.9587,
   "unit": "x interval cost",
   "severity": "high",
   "computed": true

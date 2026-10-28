@@ -24,4 +24,4 @@ RUN useradd -m -u 2000 svc && useradd -m -u 2001 noacct \
     && chmod 1777 /s3 /nvme
 
 # The entrypoint is read from the mounted repo (/opt/v5), so a change to it needs no image rebuild.
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/v5/slurm-docker/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/v5/simulation/slurm-docker/entrypoint.sh"]

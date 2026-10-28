@@ -7,8 +7,8 @@ that supersedes the old one; accepted ADRs are not rewritten.
 
 | ADR | Title | Status | Code |
 |---|---|---|---|
-| [0001](0001-checkpoint-format-and-commit.md) | Checkpoint format, commit protocol and restore checks | Proposed | `ckpt/`, `trainer/`, [checkpoint_design.md](../checkpoint_design.md) |
-| [0002](0002-job-queue-slurm.md) | Job queue on self-managed Slurm (EC2), validated in Docker Slurm: image, storage, access, events, goodput | Proposed | `slurm/`, `slurm-docker/`, `sim/` |
+| [0001](0001-checkpoint-format-and-commit.md) | Checkpoint format, commit protocol and restore checks | Proposed | `ckpt/`, `simulation/trainer/`, [checkpoint_design.md](../checkpoint_design.md) |
+| [0002](0002-job-queue-slurm.md) | Job queue on self-managed Slurm (EC2), validated in Docker Slurm: image, storage, access, events, goodput | Proposed | `slurm/`, `simulation/slurm-docker/`, `simulation/` |
 | [0003](0003-node-health-checks.md) | Node health checks and hang policy | Proposed | `health/` |
 | [0004](0004-cost-model-and-alerting.md) | Cost model, purchase options and severity-tiered alerting | Proposed | `cost/`, `metrics/`, [metrics_catalog.md](../metrics_catalog.md) |
 

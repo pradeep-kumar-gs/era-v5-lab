@@ -79,6 +79,10 @@ class NonFiniteError(CheckpointError):
     """NaN or Inf in the state. Never save it."""
 
 
+class UploadTimeout(CheckpointError):
+    """A rank did not finish its upload in time. This save is not committed; training continues."""
+
+
 # ----------------------------------------------------------------------------- small helpers
 
 def rank() -> int:
@@ -395,7 +399,7 @@ class Checkpointer:
             for r in range(meta["world_size"]):
                 key = f"{rel}/sums_rank{r}.json"
                 if not wait_for(lambda: st.exists(key), self.upload_timeout_s):
-                    raise CheckpointError(f"rank {r} did not finish its upload in time")
+                    raise UploadTimeout(f"rank {r} did not finish its upload in time")
                 files.update(st.get_json(key))
             tv = Timer()
             bad = [n for n, s in files.items() if st.sha256(f"{rel}/{n}", self.verify_mode) != s["sha256"]]

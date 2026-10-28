@@ -4,7 +4,7 @@
 - Date: 2026-10-27 (revised from 2026-10-25; second revision after the week-1 review, see [review_week1.md](../review_week1.md))
 - Area: Health (`health/health_check.py`, `health/xid_scan.py`, `health/allreduce_test.py`,
   `health/slurm_actions.py`, `health/thresholds.yaml`, `slurm/healthcheck.sh`, `slurm/prolog.sh`), hang and
-  straggler policy (`trainer/train.py`)
+  straggler policy (`simulation/trainer/train.py`)
 - Related: ADR 0001 (exit codes), ADR 0002 (drain, events, incident records), ADR 0004 (cost, metrics)
 
 > **In simple words.** Most interruptions in big training runs come from broken hardware. A broken GPU
@@ -207,10 +207,10 @@ Bad and accepted:
 | same | no nvidia-smi on a GPU node → `skipped`, required → verdict `warn` (never pass); on a CPU node → pass | pass |
 | same | prolog warn exits 0; periodic warn exits 3; forced fail exits 4 with drain reason; JSON keys match the schema | pass |
 | same | all-reduce on gloo with 2 ranks: exact sums, busbw > 0 | pass |
-| Docker Slurm (`sim/run_sim.py`) | forced `fail` on a main-run node: periodic check drains it, job saves, exits 75 and moves to the spare | pass: detect 26 s, 0 steps lost, MTTR 31 s ([sim_results.md](../sim_results.md)) |
+| Docker Slurm (`simulation/run_sim.py`) | forced `fail` on a main-run node: periodic check drains it, job saves, exits 75 and moves to the spare | pass: detect 26 s, 0 steps lost, MTTR 31 s ([sim_results.md](../sim_results.md)) |
 | Docker Slurm | forced `fail` on **both** main-run nodes with one spare: both drained, main run waits (no crash loop), recovers when they return | see [sim_results.md](../sim_results.md) |
 | Docker Slurm | `SIGSTOP` on one rank: the watchdog on the other ranks exits 75 with a stack dump; job restarts | pass: watchdog at 20 s, MTTR 24 s ([sim_results.md](../sim_results.md)) |
-| Kaggle 2×T4 (`kaggle/run_gpu_checks.py`) | real nvidia-smi values; 2-rank NCCL all-reduce with exact sums and measured busbw; a stuck rank fails cleanly after the NCCL timeout with a flight-recorder trace (`health/nccl_timeout_test.py`) | ready, to run (results go in `kaggle/results/`) |
+| Kaggle 2×T4 (`simulation/kaggle/run_gpu_checks.py`) | real nvidia-smi values; 2-rank NCCL all-reduce with exact sums and measured busbw; a stuck rank fails cleanly after the NCCL timeout with a flight-recorder trace (`health/nccl_timeout_test.py`) | ready, to run (results go in `simulation/kaggle/results/`) |
 | Week-2 node | `--mode full` five times gives the baseline thresholds | week 2 |
 
 ## Open points
@@ -219,4 +219,4 @@ Bad and accepted:
 - Should a `warn` node stay in the main-run pool?
 - `HealthCheckInterval` during the main run, and its measured cost in step time.
 - Whether V5 adds step replay for silent data corruption after dry run 2.
-- Kaggle results (`kaggle/run_gpu_checks.py`): real nvidia-smi parsing on T4 and the NCCL timeout test.
+- Kaggle results (`simulation/kaggle/run_gpu_checks.py`): real nvidia-smi parsing on T4 and the NCCL timeout test.

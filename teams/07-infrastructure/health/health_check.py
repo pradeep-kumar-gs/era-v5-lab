@@ -80,7 +80,9 @@ def gpu_checks(th, expect, fixture=None) -> list:
             # Drivers >= 535 renamed clocks_throttle_reasons.* to clocks_event_reasons.*
             alt = [f.replace("clocks_throttle_reasons", "clocks_event_reasons") for f in GPU_FIELDS]
             p = run(["nvidia-smi", f"--query-gpu={','.join(alt)}", "--format=csv,noheader,nounits"])
-            return [check("gpu", "fail" if req else "skipped", f"nvidia-smi failed: {p.stderr[:200]}", required=req)]
+            if p.returncode != 0:
+                return [check("gpu", "fail" if req else "skipped", f"nvidia-smi failed: {p.stderr[:200]}",
+                              required=req)]
         out = p.stdout
     rows = [dict(zip(GPU_FIELDS, [x.strip() for x in line.split(",")])) for line in out.strip().splitlines()]
     g = th["gpu"]

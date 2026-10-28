@@ -112,6 +112,9 @@ whole run. Without GPUs it runs on gloo (CPU) and says so.
 
 ## 4. Verdict and output
 
+`sinfo -R` shows a drained node's reason as `v5:<check names>`; `python metrics/explain.py v5:<names>` says
+what each one means and what to do ([monitoring guide](../metrics/README.md) §4.3).
+
 **Rule:** any `fail` → `fail`. Otherwise any `warn`, or a **required** check that was `skipped` (for example
 `nvidia-smi` missing on a GPU node) → `warn`. Otherwise `pass`.
 
@@ -205,10 +208,10 @@ folder.
 | same | no `nvidia-smi` on a GPU node → `skipped` → verdict `warn` (never pass); on a CPU node → pass | pass |
 | same | prolog warn exits 0; periodic warn exits 3; forced fail exits 4 with a drain reason; JSON keys match | pass |
 | same | all-reduce on gloo, 2 ranks: exact sums, busbw > 0 | pass |
-| Docker Slurm, run 8 | forced fail on a main-run node: drained within one interval, job saved and moved to the spare | MTTR 60 s, **0 steps lost** |
+| Docker Slurm, run 9 | forced fail on a main-run node: drained within one interval, job saved and moved to the spare | MTTR 60–88 s, **0 steps lost** |
 | Docker Slurm | forced fail on **both** main-run nodes, one spare | both drained; main run waits (no crash loop); recovers on repair |
 | Docker Slurm | `SIGSTOP` one rank (hang) | watchdog fires at 20 s, exit 75, restart; MTTR 56 s |
-| Kaggle 2×T4 | real nvidia-smi parsing, NCCL all-reduce, NCCL timeout with trace | ready to run (`../kaggle/README.md`) |
+| Kaggle 2×T4 | real nvidia-smi parsing, NCCL all-reduce, NCCL timeout with trace | ready to run (`../simulation/kaggle/README.md`) |
 | week-2 node | 5 × `--mode full` on good nodes | gives the real baseline thresholds |
 
 ```bash

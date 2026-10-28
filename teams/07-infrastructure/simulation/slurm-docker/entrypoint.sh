@@ -30,9 +30,9 @@ printf '%s\n' "export V5_EVENTS_DIR=/s3/events" "export V5_EXPECT_GPUS=0" \
 
 # Slurm reads its config from /etc/slurm; the files come from the repo, read-only.
 mkdir -p /etc/slurm
-cp /opt/v5/slurm/slurm.conf /opt/v5/slurm-docker/nodes.conf /opt/v5/slurm-docker/cgroup.conf \
-   /opt/v5/slurm-docker/site.conf /opt/v5/slurm-docker/gres.conf /etc/slurm/
-install -o slurm -g slurm -m 600 /opt/v5/slurm-docker/slurmdbd.conf /etc/slurm/slurmdbd.conf
+cp /opt/v5/slurm/slurm.conf /opt/v5/simulation/slurm-docker/nodes.conf /opt/v5/simulation/slurm-docker/cgroup.conf \
+   /opt/v5/simulation/slurm-docker/site.conf /opt/v5/simulation/slurm-docker/gres.conf /etc/slurm/
+install -o slurm -g slurm -m 600 /opt/v5/simulation/slurm-docker/slurmdbd.conf /etc/slurm/slurmdbd.conf
 
 case "$role" in
   slurmdbd)

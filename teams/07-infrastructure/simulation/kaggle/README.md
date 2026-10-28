@@ -15,13 +15,13 @@ the GPU-only parts on Kaggle's free 2-GPU machine. Total time is about 20–30 m
      ```
    - or zip `teams/07-infrastructure`, upload it as a Kaggle **Dataset**, add it to the notebook, then
      `!cp -r /kaggle/input/<dataset>/07-infrastructure /kaggle/working/ && cd /kaggle/working`
-     and run the script from there (the path below changes to `07-infrastructure/kaggle/...`).
+     and run the script from there (the path below changes to `07-infrastructure/simulation/kaggle/...`).
 4. Run one cell:
    ```
-   !python teams/07-infrastructure/kaggle/run_gpu_checks.py
+   !python teams/07-infrastructure/simulation/kaggle/run_gpu_checks.py
    ```
 5. Download `/kaggle/working/gpu_results/summary.md` and `summary.json` (Output panel, right side), and add
-   them to `teams/07-infrastructure/kaggle/results/`. The `*.log` files there help if a step failed.
+   them to `teams/07-infrastructure/simulation/kaggle/results/`. The `*.log` files there help if a step failed.
 
 No AWS keys, tokens or personal data are used or written.
 

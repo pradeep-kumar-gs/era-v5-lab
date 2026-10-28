@@ -22,9 +22,17 @@ from common.events import emit, read_all  # noqa: E402
 from metrics.evaluate import CATALOG, ORDER, Run, compute, severity  # noqa: E402
 
 
+def message(alert) -> str:
+    """The page a person reads: what, why it matters, what to do, how fast, and where to read more."""
+    return (f"[{alert['severity'].upper()}] {alert['id']} {alert['name']}: {alert['value']} {alert['unit']}\n"
+            f"Why it matters: {alert['why']}\n"
+            f"What to do: {alert['action']}\n"
+            f"Respond: {alert['respond']} ({alert['who']}). More: {alert['explain']}")
+
+
 def post(url, alert):
     """Generic JSON webhook; Slack and Discord accept {"text"/"content": ...}."""
-    text = f"[{alert['severity'].upper()}] {alert['id']} {alert['name']}: {alert['value']} {alert['unit']} -> {alert['action']}"
+    text = message(alert)
     body = json.dumps({"text": text, "content": text, "alert": alert}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
@@ -62,7 +70,9 @@ def main():
                 if sev and ORDER[sev] > ORDER[state.get(x["id"])]:
                     state[x["id"]] = sev
                     alert = {"id": x["id"], "severity": sev, "name": x["name"], "value": round(v, 4),
-                             "unit": x["unit"], "action": x["action"]}
+                             "unit": x["unit"], "area": x["area"], "why": x["why"], "action": x["action"],
+                             "respond": cat["severity"][sev]["response"], "who": cat["severity"][sev]["who"],
+                             "explain": f"python metrics/explain.py {x['id']}"}
                     delivered = post(hook, alert) if hook else None
                     emit("alert.fired", **alert, page=sev == "high", delivered=delivered)
                     print(json.dumps(alert), flush=True)

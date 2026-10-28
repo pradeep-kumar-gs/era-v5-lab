@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-27 (revised from 2026-10-25; second revision after the week-1 review, see [review_week1.md](../review_week1.md))
-- Area: Queue (`slurm/`, `slurm-docker/`, `sim/run_sim.py`), cluster image, storage, access, events, goodput
+- Area: Queue (`slurm/`, `simulation/slurm-docker/`, `simulation/run_sim.py`), cluster image, storage, access, events, goodput
 - Related: ADR 0001 (checkpoint, exit codes), ADR 0003 (health, drain), ADR 0004 (cost, metrics)
 
 > **In simple words.** A scheduler is the "front desk" of the cluster: teams hand in jobs, it decides who
@@ -57,7 +57,7 @@ Runtime options: (i) bare AMI + venv; (ii) **container image run by Slurm throug
 ## Decision
 
 **E. Self-managed Slurm on EC2, with containers through Pyxis/Enroot. One `slurm/slurm.conf` for Docker and
-EC2; only the node lines differ (`slurm-docker/nodes.conf` vs `slurm/nodes.ec2.conf`).**
+EC2; only the node lines differ (`simulation/slurm-docker/nodes.conf` vs `slurm/nodes.ec2.conf`).**
 
 ### 1. Cluster shape
 
@@ -80,7 +80,7 @@ EC2; only the node lines differ (`slurm-docker/nodes.conf` vs `slurm/nodes.ec2.c
   records GPU-hours per account, so budgets and reports are in GPU-hours. Docker uses 2 placeholder GPUs per
   node (no computation) to test allocation and accounting.
 - **The only Docker/EC2 differences** are four small files: `site.conf` (process tracking and cgroups),
-  `nodes.conf`, `gres.conf`, `cgroup.conf` (`slurm-docker/` vs `slurm/*.ec2.conf`). `slurm.conf` is shared.
+  `nodes.conf`, `gres.conf`, `cgroup.conf` (`simulation/slurm-docker/` vs `slurm/*.ec2.conf`). `slurm.conf` is shared.
 - **When nodes run out:** if more nodes fail than there are spares, the main run **waits** (pending) and
   Q-01 pages at 10 min. It does **not** shrink by itself: a smaller world changes speed, is not bit-equal, and
   needs a person to agree. The operator may restart it on fewer nodes (`sbatch --nodes=1`), which the
@@ -101,7 +101,7 @@ EC2; only the node lines differ (`slurm-docker/nodes.conf` vs `slurm/nodes.ec2.c
 - Jobs run with `srun --container-image=<digest>`; the AMI holds only the driver, EFA, Enroot/Pyxis and Slurm.
 - The digest goes into every checkpoint manifest (ADR 0001); a different digest refuses to resume unless overridden.
 - **One stack only.** V4's second "nightly + tarball" path is not allowed. The Docker test image
-  (`slurm-docker/Dockerfile`) pins torch 2.5.1 CPU the same way.
+  (`simulation/slurm-docker/Dockerfile`) pins torch 2.5.1 CPU the same way.
 
 ### 3. Storage
 
@@ -149,6 +149,10 @@ root
 - `slurm.conf`: `JobRequeue=1`, **`RequeueExit=75`**, **`RequeueExitHold=78`**, `MaxBatchRequeue=1000`.
 - `slurm/run_job.py` (the wrapper) maps every trainer outcome to 0, 75 or 78 (ADR 0001 §6), applies the
   **crash-loop cap** (3 crashes in 30 min → 78), and emits `job.started / ended / requeued / held`.
+- **Plain-words status** (added for monitoring): the trainer leaves an exit note with its cause; the wrapper
+  writes "what happened / already done / what you do" (from `common/reasons.py`) into the Slurm job comment,
+  the job log and the job events. A held job therefore says why and what to do in `squeue` itself, instead of
+  only `SPECIAL_EXIT / JobHeldUser`. Tested in the simulation (drill `held_job_explains_itself`).
 - **Signals.** The trainer treats SIGUSR1 and SIGTERM the same: save, wait for the commit, exit 75.
   - Preemption: Slurm sends SIGTERM, then SIGKILL after `GraceTime` (60 s) / `KillWait` (30 s).
   - Spot notice or health drain: `scancel --signal=USR1 <job>` from the node itself (ADR 0003).
@@ -311,11 +315,11 @@ Bad and accepted:
 
 ## Validation
 
-`sim/run_sim.py` starts `slurm-docker/` (MariaDB, slurmdbd, slurmctld, 4 compute containers) with the
+`simulation/run_sim.py` starts `simulation/slurm-docker/` (MariaDB, slurmdbd, slurmctld, 4 compute containers) with the
 production `slurm.conf`, runs every drill in §10, then `metrics/evaluate.py`. Results are in
-`sim/results/` (`drills.json`, `report.md`, `metrics.json`, `alerts.json`); see [sim_results.md](../sim_results.md).
+`simulation/results/` (`drills.json`, `report.md`, `metrics.json`, `alerts.json`); see [sim_results.md](../sim_results.md).
 
-**Result (run 8, 2026-10-28): 30 of 30 drills pass in 21 minutes.** MTTR per fault type (2 nodes × 2 ranks,
+**Result (run 9, 2026-10-28): 31 of 31 drills pass in 22 minutes** (run 8: 30 of 30). MTTR per fault type (2 nodes × 2 ranks,
 tiny model, checkpoints on the S3 emulator):
 
 | Drill | MTTR p50 (n) | Steps lost |

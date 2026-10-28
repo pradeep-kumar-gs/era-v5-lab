@@ -1,4 +1,4 @@
-# Job queue (`slurm/` and `slurm-docker/`): who runs where, and how the main run restarts by itself
+# Job queue (`slurm/` and `simulation/slurm-docker/`): who runs where, and how the main run restarts by itself
 
 Decision record: [ADR 0002](../docs/adr/0002-job-queue-slurm.md). Checkpoint side:
 [../ckpt/README.md](../ckpt/README.md). Health side: [../health/README.md](../health/README.md).
@@ -106,6 +106,11 @@ sbatch slurm/mainrun.sbatch
 - **The wrapper** (`run_job.py`) maps every trainer outcome to 0, 75 or 78, applies the **crash-loop cap**
   (3 crashes in 30 min → hold: retrying a broken job just burns money), and writes `job.started / ended /
   requeued / held` events.
+- **Every job says why it stopped, in plain words**, where people look: the Slurm job comment
+  (`squeue -o "%.10i %.12T %.20r %k"`), a banner at the end of the job log, and the events. For example
+  `V5 HELD (78): loss spike: held at step 5880. Explain: python metrics/explain.py loss_spike. Do: roll back …`.
+  The trainer leaves a short exit note (`common.reasons.write_exit_note`); the words come from
+  `common/reasons.py`. Monitoring guide: [../metrics/README.md](../metrics/README.md).
 - **Signals.** The trainer treats SIGUSR1 and SIGTERM the same: save, wait for the commit, exit 75.
 
 | Who sends it | When | What the job loses |
@@ -156,7 +161,7 @@ operator can restart it on fewer nodes (`sbatch --nodes=1 …`); the rollback dr
 | `site.ec2.conf`, `cgroup.ec2.conf`, `gres.ec2.conf` | EC2 only: cgroup enforcement (a job uses only its own cores, memory, GPUs), GPU discovery through NVML |
 | `mainrun.sbatch` | the main-run job: account `mainrun`, 2 nodes × 8 GPUs, `--requeue`, sets the deterministic env (`OMP_NUM_THREADS=1`) and the NCCL flight recorder |
 | `team_job.sbatch` | a preemptible team job |
-| `run_job.py` | the wrapper: exit-code mapping, crash-loop cap, job events |
+| `run_job.py` | the wrapper: exit-code mapping, crash-loop cap, job events, plain-words job comment; starts `V5_TRAIN_SCRIPT` (default: the test trainer in `simulation/trainer/`) |
 | `prolog.sh` | quick health check before a job starts on a node (see health README) |
 | `epilog.sh` | cleans temporary restore files on NVMe after a job |
 | `healthcheck.sh` | Slurm's `HealthCheckProgram`, every 30 s |
@@ -164,7 +169,7 @@ operator can restart it on fewer nodes (`sbatch --nodes=1 …`); the rollback dr
 | `setup_accounts.sh` | creates accounts, QOS, limits and the `svc` user |
 | `backup_db.sh` | dump and `--verify-latest` the accounting database |
 
-### `slurm-docker/` (the test cluster on a laptop)
+### `simulation/slurm-docker/` (the test cluster on a laptop)
 
 | File | What it does |
 |---|---|
@@ -186,13 +191,13 @@ real thing.
 From `teams/07-infrastructure`, with Docker Desktop running:
 
 ```bash
-docker compose -f slurm-docker/docker-compose.yml build slurmdbd   # once, ~5 min
-python3 sim/run_sim.py                    # every drill, ~25 min; ends with "N/N drills passed"
-python3 sim/run_sim.py --keep-up          # same, but leave the cluster running to poke at it
+docker compose -f simulation/slurm-docker/docker-compose.yml build slurmdbd   # once, ~5 min
+python3 simulation/run_sim.py                    # every drill, ~25 min; ends with "N/N drills passed"
+python3 simulation/run_sim.py --keep-up          # same, but leave the cluster running to poke at it
 ```
 
 With the cluster up, open a shell on the controller
-(`docker compose -f slurm-docker/docker-compose.yml exec slurmctld bash`) and try:
+(`docker compose -f simulation/slurm-docker/docker-compose.yml exec slurmctld bash`) and try:
 
 ```bash
 sinfo                                  # nodes and their state (idle / alloc / drain / down)
@@ -206,14 +211,14 @@ scontrol ping                          # which controller is in charge
 
 ---
 
-## 8. What the simulation proved (run 8, 30 of 30 drills)
+## 8. What the simulation proved (run 9, 31 of 31 drills)
 
 | Drill | What happened | Recovery time (MTTR p50) | Work lost |
 |---|---|---|---|
 | kill a training process | wrapper → 75 → requeued → restored | 50 s (3 runs) | 24–45 steps |
 | preemption signal | emergency save, 75, requeued | 58 s (3 runs) | 0 |
 | spot notice | node drained, save, moved to the spare | 57 s | 0 |
-| health fail | drained within one interval, save, moved | 60 s | 0 |
+| health fail | drained within one interval, save, moved | 88 s | 0 |
 | frozen process (hang) | watchdog at 20 s → 75 → restart | 56 s | 44 steps |
 | node unplugged | DOWN after ~30 s, requeued on remaining nodes | 88 s | 24 steps |
 | two nodes down, one spare | main run waits (no crash loop), recovers on repair | 58 s after repair | — |

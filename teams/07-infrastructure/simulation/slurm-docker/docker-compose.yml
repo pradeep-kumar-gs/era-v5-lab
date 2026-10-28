@@ -12,7 +12,7 @@ x-node: &node
   command: ["slurmd"]
   privileged: true          # slurmd needs to manage processes; test cluster only
   volumes:
-    - ../:/opt/v5:ro
+    - ../../:/opt/v5:ro
     - munge:/etc/munge
     - s3:/s3
   depends_on: [slurmctld]
@@ -34,14 +34,14 @@ services:
     build: .
     hostname: slurmdbd
     command: ["slurmdbd"]
-    volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3"]
+    volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3"]
     depends_on: [mariadb]
 
   slurmctld:
     image: v5-slurm-sim:1
     hostname: slurmctld
     command: ["slurmctld"]
-    volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "ctld:/var/spool/slurmctld"]
+    volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "ctld:/var/spool/slurmctld"]
     environment: *env
     depends_on: [slurmdbd]
 
@@ -49,7 +49,7 @@ services:
     image: v5-slurm-sim:1
     hostname: slurmctld2
     command: ["slurmctld"]
-    volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "ctld:/var/spool/slurmctld"]
+    volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "ctld:/var/spool/slurmctld"]
     environment: *env
     depends_on: [slurmctld]
 
@@ -57,11 +57,11 @@ services:
     image: v5-slurm-sim:1
     hostname: s3emu
     command: ["s3emu"]
-    volumes: ["../:/opt/v5:ro"]
+    volumes: ["../../:/opt/v5:ro"]
 
-  c1: {<<: *node, hostname: c1, volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme1:/nvme"]}
-  c2: {<<: *node, hostname: c2, volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme2:/nvme"]}
-  c3: {<<: *node, hostname: c3, volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme3:/nvme"]}
-  c4: {<<: *node, hostname: c4, volumes: ["../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme4:/nvme"]}
+  c1: {<<: *node, hostname: c1, volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme1:/nvme"]}
+  c2: {<<: *node, hostname: c2, volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme2:/nvme"]}
+  c3: {<<: *node, hostname: c3, volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme3:/nvme"]}
+  c4: {<<: *node, hostname: c4, volumes: ["../../:/opt/v5:ro", "munge:/etc/munge", "s3:/s3", "nvme4:/nvme"]}
 
 volumes: {db: {}, munge: {}, s3: {}, ctld: {}, nvme1: {}, nvme2: {}, nvme3: {}, nvme4: {}}

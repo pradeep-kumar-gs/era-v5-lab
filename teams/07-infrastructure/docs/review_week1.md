@@ -16,8 +16,10 @@ Setup: a Docker Slurm cluster with two controllers, the accounting database, an 
 code runs against it), three "GPU" nodes with two placeholder GPUs each (allocation and accounting only; no
 computation) and one eval/CPU node. The main run uses 2 nodes × 2 ranks; the third node is the hot spare. The
 tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [sim_results.md](sim_results.md).
+The kit lives in `simulation/` (optional; see [simulation/README.md](../simulation/README.md)).
 
-**Latest full run (run 8, 28 Oct 2026): 30 of 30 drills pass in 21 minutes.**
+**Latest full run (run 9, 28 Oct 2026): 31 of 31 drills pass in 22 minutes** (run 8: 30 of 30; run 9 adds
+`held_job_explains_itself`, and runs from the reorganised folder).
 
 | Fault injected | What happened | MTTR p50 (n) | Work lost |
 |---|---|---|---|
@@ -26,7 +28,7 @@ tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [
 | kill **during** a save | the half-uploaded checkpoint is never used; previous commit restored | 50 s | since previous commit |
 | kill **during** a restore | next attempt restores the same checkpoint, no failure | 112 s | 0 extra |
 | spot notice | node drained, emergency save, job moves to the spare | 57 s | 0 |
-| fake GPU failure | health check drains within one interval; save; job moves | 60 s | 0 |
+| fake GPU failure | health check drains within one interval; save; job moves | 60–88 s | 0 |
 | two nodes down, one spare | main run waits (no crash loop); recovers when nodes return | 58 s after repair | — |
 | frozen process (hang) | watchdog fires at 20 s; restart | 56 s | 44 steps |
 | node unplugged | Slurm marks it down after ~30 s; requeued on remaining nodes | 88 s | 24 steps |
@@ -35,7 +37,7 @@ tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [
 
 Also passing: accounts (no account → rejected), preemption of team jobs (they save first), GPU allocation
 (`gres/gpu=4`, over-ask refused), crash-loop hold, DB backup + test restore (31 of 31 tables), budget limit,
-fair share, GPU-minutes per account, retention on S3 (no protected checkpoint deleted), safetensors export
+fair share, GPU-minutes per account (main run 32.4 GPU-min in run 9), retention on S3 (no protected checkpoint deleted), safetensors export
 (bit-equal probe), live alerts (23 fired, including every drill-caused HIGH).
 
 **Why MTTR is ≈ 50–60 s now (it was 3–57 s in run 3):** most of it is Slurm's requeue wait. Our earlier
@@ -43,8 +45,8 @@ fair share, GPU-minutes per account, retention on S3 (no protected checkpoint de
 `cred_expire=30`. About 50 s per restart is the price of never losing the run; at 8 nodes that is ≈ $13 per
 restart (assumed prices), small next to the work lost per failure.
 
-Known reporting gap in run 8: GPU-minutes counted only the last segment of each requeued job (`sacct` without
-`-D`), so `mainrun` shows 0.2 GPU-minutes. Fixed in `sim/run_sim.py`; the next run reports full usage.
+Reporting gap found in run 8 and closed in run 9: GPU-minutes counted only the last segment of each requeued job
+(`sacct` without `-D`), so `mainrun` showed 0.2 GPU-minutes. With `-D`, run 9 shows 32.4.
 
 How to read the goodput number in the report: the simulation injects a fault about every half minute, while a
 real run sees one every few hours to days. So "useful share of time" is low **by design of the test**. What
@@ -65,6 +67,8 @@ projects onto real failure rates.
 | report: "8 interruptions per day" was 8 in 10 min | wrong alert level | rates divide by the observed window | FIXED + TESTED |
 | report: one hang counted once per rank | watchdog rate tripled | one count per hang | FIXED + TESTED |
 | report: the drill switch counted as a real Xid | H-01 false positive | H-01 counts only real Xid lines | FIXED + TESTED |
+| catalog: an unquoted comma in two metric names (CK-05, Q-06) broke their YAML entry | names cut short in pages | quoted; test added | FIXED + TESTED |
+| health: on new drivers the renamed-field retry was ignored | a healthy GPU node reported "nvidia-smi failed" and drained | retry result used; test added | FIXED + TESTED |
 | report: test-caused alerts not marked | readers think production is broken | column "Caused by the test?" (yes / fault rate / no) | FIXED + TESTED |
 
 ## 3. Questions the instructor may ask, and our answer
@@ -107,6 +111,16 @@ projects onto real failure rates.
 | C6 | Where are the logs? | node-local, shipped to S3 by Team 08's agent; 90 days, then Glacier | DECIDED |
 | C7 | Security | IAM role per job type, no keys, SSM only, munge key from Secrets Manager, pr-guard + gitleaks | DECIDED; needs the AWS account |
 
+### E. Monitoring: can people act on what they see?
+
+| # | Question | Answer | Status |
+|---|---|---|---|
+| E1 | A held job shows `SPECIAL_EXIT / JobHeldUser`. How does anyone know why? | the wrapper writes the cause and next step into the Slurm job comment, the job log and the events (`V5 HELD (78): NaN at step 5595 … Do: roll back …`) | FIXED + TESTED (drill `held_job_explains_itself`) |
+| E2 | What does exit 137, `IntegrityError` or `v5:xid` mean? | `python metrics/explain.py <anything>`; all on one page in [codes_and_actions.md](codes_and_actions.md) | FIXED + TESTED |
+| E3 | Does a page say what to do? | every alert carries why, action, response time, owner, and the explain command | FIXED + TESTED (live alerts) |
+| E4 | Can a new cause be added without an explanation? | no: `metrics/test_monitoring.py` fails | FIXED + TESTED |
+| E5 | How does Team 08 consume it? | events (JSON lines), the webhook, `metrics.json`; guide and dashboard panels in [metrics/README.md](../metrics/README.md) | DECIDED; their store and pager are Team 08's |
+
 ### D. Evidence quality
 
 | # | Question | Answer | Status |
@@ -121,7 +135,7 @@ projects onto real failure rates.
 
 | Item | Needs | Owner |
 |---|---|---|
-| GPU behaviour (NCCL, nvidia-smi, CUDA bit-equal, save speed) | Kaggle run (`kaggle/run_gpu_checks.py`) | Team 07 |
+| GPU behaviour (NCCL, nvidia-smi, CUDA bit-equal, save speed) | Kaggle run (`simulation/kaggle/run_gpu_checks.py`) | Team 07 |
 | EFA, Pyxis/Enroot, power saving, IAM, AWS Budgets, real S3 throughput | the AWS account and the week-2 node | Team 07 + instructor |
 | Sharded-state resharding (FSDP/EP) | Team 05's model and parallel layout | Team 05 + 07 |
 | Real data-loader state | the loader passing `ckpt/loader_contract.py` | Teams 01/02 |

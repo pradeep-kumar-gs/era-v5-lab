@@ -119,6 +119,10 @@ HIGH alerts, all areas:
 - **Live alerts:** `metrics/watch.py` recomputes the catalog every 30 s from the events and, when a metric reaches
   a new severity, writes `alert.fired` and posts to `V5_ALERT_WEBHOOK`. HIGH sets `page: true`. In the simulation
   it runs during all drills, and the drill-caused HIGH alerts must fire (drill `live_alerts`).
+- **Every alert says what to do:** the payload carries `why`, `action`, `respond` (how fast), `who`, and
+  `explain` (`python metrics/explain.py <id>`). `metrics/explain.py` explains any exit code, cause, alert id,
+  drain reason or Slurm reason; `metrics/test_monitoring.py` fails if the code can report something without an
+  explanation. Guide for Team 08 and on-call: [metrics/README.md](../../metrics/README.md).
 - **Rates are scaled:** per-day and per-hour metrics divide by the observed window (the first report printed raw
   counts as "per day"). In the simulation report, alerts caused by the injected fault rate are marked
   "fault rate", and alerts a drill causes on purpose are marked "yes".
@@ -144,7 +148,7 @@ HIGH alerts, all areas:
 
 Good:
 
-- Every dollar of the main run is in a named bucket, with a dollar value, in `sim/results/report.md` today and in
+- Every dollar of the main run is in a named bucket, with a dollar value, in `simulation/results/report.md` today and in
   the dry-run reports later.
 - Paging is limited to events where acting now saves money or protects a checkpoint.
 - Purchase decisions are written down with their reason, and can be revisited by re-running the model with real
@@ -160,10 +164,10 @@ Bad and accepted:
 
 ## Validation
 
-- `cost/cost_model.py` runs and writes `cost/cost_report.md`; with `--measured sim/results/metrics.json` it uses
+- `cost/cost_model.py` runs and writes `cost/cost_report.md`; with `--measured simulation/results/metrics.json` it uses
   the MTTR measured in the simulation.
-- `sim/run_sim.py` runs every drill and `metrics/evaluate.py`; each injected fault must raise its expected alert
-  (column "Caused by the test?" in `sim/results/report.md`), and `metrics/watch.py` must fire them live.
+- `simulation/run_sim.py` runs every drill and `metrics/evaluate.py`; each injected fault must raise its expected alert
+  (column "Caused by the test?" in `simulation/results/report.md`), and `metrics/watch.py` must fire them live.
   See [sim_results.md](../sim_results.md).
 - `python -m pytest cost/test_cost.py`: the unmanaged-instance check and the cost-model formulas.
 

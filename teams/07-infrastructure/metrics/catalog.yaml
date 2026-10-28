@@ -32,7 +32,7 @@ metrics:
    low: null, medium: null, high: 1, sim: true, owner: "07",
    why: "A damaged checkpoint file. The restore skips it, but the cause (disk, network, S3) can damage the next one.",
    action: "Find the hop that corrupts data (NVMe, network, S3). Pin the last good checkpoint."}
-- {id: CK-05, area: checkpoint, name: Restore check failures (digest, probe, next batch, frozen), unit: count,
+- {id: CK-05, area: checkpoint, name: "Restore check failures (digest, probe, next batch, frozen)", unit: count,
    direction: above, low: null, medium: null, high: 1, sim: true, owner: "07",
    why: "The loaded state is not the saved state: a silent misload like V4's (loss 2.95 vs 2.55).",
    action: "Stop the run; compare the printed saved/restored values; do not continue on that checkpoint."}
@@ -118,7 +118,7 @@ metrics:
    low: 2, medium: 5, high: 10, sim: true, owner: "07",
    why: "A rising rate means a bad node or bad code; each one costs ~interval/2 + MTTR.",
    action: "Group incidents by node and cause_class; drain repeat offenders."}
-- {id: Q-06, area: queue, name: Idle GPU node-hours (up, no job), unit: node-h/day, direction: above,
+- {id: Q-06, area: queue, name: "Idle GPU node-hours (up, no job)", unit: node-h/day, direction: above,
    low: 0.5, medium: 2, high: 4, sim: false, owner: "07",
    why: "An idle running GPU node costs the full hourly price for nothing.",
    action: "Check SuspendTime / power saving; stop forgotten instances."}
@@ -239,7 +239,7 @@ metrics:
 - {id: H-14, area: health, name: Step watchdog fired (hang), unit: count/h, direction: above,
    low: null, medium: 1, high: 2, sim: true, owner: "07",
    why: "A hang was turned into a restart; repeated hangs point to a bad node or a deadlock.",
-   action: "Read the flight-recorder and py-spy dumps; drain the rank that stopped."}
+   action: "Read the stack dump in the job log and the NCCL flight-recorder trace; drain the rank that stopped."}
 - {id: H-15, area: health, name: Straggler ratio (rank step time / median), unit: ratio, direction: above,
    low: 1.05, medium: 1.1, high: 1.25, sim: true, owner: "05 logs, 08 alerts, 07 acts",
    why: "The slowest rank sets the speed of all ranks: a 10% straggler wastes 10% of the bill.",

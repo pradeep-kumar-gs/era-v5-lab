@@ -8,7 +8,7 @@ finds the interval with the lowest total waste, and turns waste into dollars. It
 
 Model sizes are still open in config_v0.yaml (TSAI fills them on 31 Oct), so the model takes a range.
 
-    python cost/cost_model.py [--measured sim/results/metrics.json] [--out cost/cost_report.md]
+    python cost/cost_model.py [--measured simulation/results/metrics.json] [--out cost/cost_report.md]
 """
 import argparse
 import json
