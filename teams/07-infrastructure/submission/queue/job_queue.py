@@ -17,6 +17,7 @@ Commands:
     job_queue.py spot-watch                             per node: AWS 2-minute spot warning -> drain + save
     job_queue.py drain <reason> [--node N]              take a node out; its jobs save and move
     job_queue.py status                                 jobs and drained nodes, explained in plain words
+    job_queue.py keep-spare                             controller, every minute: name the hot spare, boot one if none
 
 Where it reports: the Slurm job comment (`squeue -o "%.10i %.12T %.20r %k"`), a banner at the end of the job log,
 and the job.* / node.* events. The words come from common/reasons.py.
@@ -36,6 +37,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
+from ckpt.store import open_store  # noqa: E402  (no torch: the wrapper stays light)
 from common.events import emit  # noqa: E402
 from common.reasons import (DRAIN, EXIT_CODES, EXIT_DONE, EXIT_FATAL, EXIT_RETRY, RAW_EXIT, SLURM,  # noqa: E402
                             lookup, read_exit_notes)
@@ -86,17 +88,64 @@ def ask_jobs_to_save_and_stop(node: str = None, why: str = "") -> list:
     return jobs
 
 
+# ============================================================================ the hot spare
+# In simple words: one GPU node must always be up and free for the main run, so a failure moves the run in
+# seconds, not after a new instance boots (up to 15 min). Slurm's `SuspendExcNodes=gpu-[1-9]:1` count form is
+# not clear on whether busy nodes count toward the 1, so we do not depend on it. Every minute, on the
+# controller, this names the spare node explicitly (`SuspendExcNodes=<that node>`), and powers one up if no
+# node is free. A spare may run preemptible team jobs (ADR 0002 §1): the main run preempts them.
+OK_STATES = {"idle", "mix", "alloc", "comp"}       # powered up and usable; "~" off, "#" powering up, drain/down out
+
+
+def keep_spare(partition: str = "gpu", want: int = 1) -> dict:
+    p = _slurm(["sinfo", "-h", "-N", "-p", partition, "-o", "%N|%t"])
+    if p is None or p.returncode != 0:
+        return {"ok": False, "detail": "sinfo not available"}
+    state = dict(line.split("|", 1) for line in p.stdout.split() if "|" in line)
+    q = _slurm(["squeue", "-h", "-q", "mainrun", "-t", "RUNNING,COMPLETING", "-o", "%N"])
+    main = set()
+    for nl in (q.stdout.split() if q is not None and q.returncode == 0 else []):
+        h = _slurm(["scontrol", "show", "hostnames", nl])
+        main |= set(h.stdout.split()) if h is not None and h.returncode == 0 else {nl}
+    free = sorted(n for n, s in state.items() if s in OK_STATES and n not in main)
+    free.sort(key=lambda n: state[n] != "idle")            # prefer an idle node over one running team jobs
+    booting = sorted(n for n, s in state.items() if s.endswith("#") and n not in main)
+    spares = (free + booting)[:want]
+    powered = []
+    for n in sorted(n for n, s in state.items() if s == "idle~"):
+        if len(spares) >= want:
+            break
+        _slurm(["scontrol", "update", f"nodename={n}", "state=power_up"])
+        spares.append(n)
+        powered.append(n)
+    if spares:
+        _slurm(["scontrol", "update", f"SuspendExcNodes={','.join(spares)}"])
+    out = {"ok": len(spares) >= want, "spares": spares, "powered_up": powered, "main_run_nodes": sorted(main)}
+    emit("node.spare", **out)
+    return out
+
+
 # ============================================================================ the job wrapper
-def crash_loop(run_dir: str) -> tuple:
-    """Record this crash; return (is_loop, crashes_in_window)."""
-    os.makedirs(run_dir, exist_ok=True)
-    p = os.path.join(run_dir, "crashes.jsonl")
+def crash_loop(run_url: str) -> tuple:
+    """Record this crash in the run's S3 folder; return (is_loop, crashes_in_window).
+
+    In simple words: a requeued job can start on any node, so the count cannot live on a node's disk (it
+    would start from zero each time) or in an appended file (S3 cannot append). It is one small object,
+    `crashes.json`, read and rewritten whole. Only one wrapper of a job runs at a time, so there is no race.
+    If S3 cannot be reached, the crash is retried as usual and an event says the cap is not counting."""
     now = time.time()
-    with open(p, "a") as f:
-        f.write(json.dumps({"time": now, "job_id": os.environ.get("SLURM_JOB_ID")}) + "\n")
-    with open(p) as f:
-        recent = [r for r in map(json.loads, f) if now - r["time"] <= CRASHLOOP_WINDOW_S]
-    return len(recent) >= CRASHLOOP_N, len(recent)
+    try:
+        st = open_store(run_url)
+        log = st.get_json("crashes.json") if st.exists("crashes.json") else []
+        log = [r for r in log if now - r["time"] <= CRASHLOOP_WINDOW_S]
+        log.append({"time": now, "job_id": os.environ.get("SLURM_JOB_ID"),
+                    "restart": int(os.environ.get("SLURM_RESTART_COUNT", "0")), "node": node_name()})
+        st.put_json("crashes.json", log)
+    except Exception as e:  # noqa: BLE001 - a broken ledger must never turn a retry into a lost job
+        emit("job.crash_ledger_unavailable", cause="crash_ledger_unavailable", detail=str(e)[:300],
+             **{k: v for k, v in lookup("crash_ledger_unavailable").items() if k in ("title", "you_do", "severity")})
+        return False, 0
+    return len(log) >= CRASHLOOP_N, len(log)
 
 
 def set_comment(text: str) -> None:
@@ -129,7 +178,7 @@ def banner(x: dict) -> None:
 
 def run(srun_args: list, train_args: list) -> int:
     run_id = os.environ.get("RUN_ID", "run")
-    run_dir = os.path.join(os.environ.get("V5_RUNS_DIR", "/s3/runs"), run_id)
+    run_url = os.environ.get("V5_REMOTE_ROOT", "/s3/ckpt").rstrip("/") + "/" + run_id   # same folder as the checkpoints
     restart = int(os.environ.get("SLURM_RESTART_COUNT", "0"))
     emit("job.started", restart_count=restart, nodes=os.environ.get("SLURM_JOB_NODELIST", ""),
          account=os.environ.get("SLURM_JOB_ACCOUNT", ""), qos=os.environ.get("SLURM_JOB_QOS", ""))
@@ -153,7 +202,7 @@ def run(srun_args: list, train_args: list) -> int:
         out = rc
         cause = note.get("cause") or {0: "done", 75: "saved_and_stopped", 78: "unknown_fatal"}[rc]
     else:
-        loop, n = crash_loop(run_dir)
+        loop, n = crash_loop(run_url)
         out = EXIT_FATAL if loop else EXIT_RETRY
         cause = "crash_loop" if loop else "crash"
         if loop:
@@ -196,7 +245,7 @@ def spot_notice() -> str:
 
 
 def spot_watch() -> int:
-    os.environ.setdefault("V5_EVENTS_DIR", "/s3/events")
+    os.environ.setdefault("V5_EVENTS_DIR", "/var/log/v5/events")
     handled = False
     while True:
         n = spot_notice()
@@ -254,7 +303,12 @@ def main(argv) -> int:
     d.add_argument("reason")
     d.add_argument("--node")
     sub.add_parser("status", help="jobs and drained nodes, in plain words")
+    k = sub.add_parser("keep-spare", help="controller, every minute: keep one free GPU node up (the hot spare)")
+    k.add_argument("--partition", default="gpu")
+    k.add_argument("--spares", type=int, default=1)
     a = ap.parse_args(argv)
+    if a.cmd == "keep-spare":
+        return 0 if keep_spare(a.partition, a.spares)["ok"] else 3
     if a.cmd == "spot-watch":
         return spot_watch()
     if a.cmd == "drain":

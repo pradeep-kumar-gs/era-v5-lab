@@ -107,8 +107,8 @@ metrics:
    why: "Held means a person must act; until then the cluster burns money with no training.",
    action: "Read the job.held cause; rollback or fix, then release."}
 - {id: Q-03, area: queue, name: Reschedule latency (job end to running again), unit: s, direction: above,
-   low: 60, medium: 120, high: 600, sim: true, owner: "07",
-   why: "Time between the crash and the restart is pure loss.",
+   low: 120, medium: 300, high: 600, sim: true, owner: "07",
+   why: "Time between the crash and the restart is pure loss. Floor: cred_expire=60 + 1 s, so a normal restart is 85-95 s; LOW starts at 2x that floor.",
    action: "Check the spare is up and idle (Q-08), and slurmctld load."}
 - {id: Q-04, area: queue, name: Crash-loop holds, unit: count, direction: above,
    low: null, medium: 1, high: null, sim: true, owner: "07",

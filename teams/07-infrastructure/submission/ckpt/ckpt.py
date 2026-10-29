@@ -52,7 +52,7 @@ EXIT_RETRY = 75   # state is safe (saved, or nothing to save): requeue, maybe on
 EXIT_FATAL = 78   # retrying will not help (NaN, failed checks): hold the job and page a person
 
 MANIFEST = "MANIFEST.json"
-SCHEMA = "v5-ckpt/1"
+SCHEMA = "v5-ckpt/2"         # 2: logical fingerprints (reshard-safe), async save, loader_global
 
 
 class CheckpointError(Exception):
@@ -77,6 +77,10 @@ class EnvMismatchError(CheckpointError):
 
 class NonFiniteError(CheckpointError):
     """NaN or Inf in the state. Never save it."""
+
+
+class ReshardError(CheckpointError):
+    """The loader saved per-rank positions, so this checkpoint cannot resume at another world size."""
 
 
 class UploadTimeout(CheckpointError):
@@ -180,18 +184,93 @@ def tensor_items(sd) -> list:
     return sorted((k, v) for k, v in flatten(sd).items() if isinstance(v, torch.Tensor))
 
 
-def tensor_bytes(t: torch.Tensor) -> bytes:
-    return t.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+def local_part(t: torch.Tensor) -> torch.Tensor:
+    """This rank's piece of a tensor: the local shard of an FSDP2/TP DTensor, or the tensor itself."""
+    return t.to_local() if hasattr(t, "to_local") else t
+
+
+def shard_place(t: torch.Tensor):
+    """(local piece, its offset in the full tensor per dim, whether this rank adds it to the fingerprint).
+
+    A plain tensor is a full copy on every rank (DDP), so only rank 0 adds it. A DTensor shard is added by
+    every rank that holds a different piece; replicated copies are added once (mesh coordinate 0)."""
+    if not hasattr(t, "placements"):
+        return t, (0,) * t.dim(), rank() == 0
+    try:
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+    except ImportError:  # torch < 2.5
+        from torch.distributed._tensor._utils import compute_local_shape_and_global_offset
+    loc = t.to_local()
+    shape, off = compute_local_shape_and_global_offset(t.shape, t.device_mesh, t.placements)
+    if tuple(loc.shape) != tuple(shape):
+        raise CheckpointError(f"shard of shape {tuple(loc.shape)} does not match its placement {tuple(shape)}")
+    coord = t.device_mesh.get_coordinate() or ()
+    dup = any(p.is_replicate() and coord[i] != 0 for i, p in enumerate(t.placements))
+    return loc, tuple(off), not dup
+
+
+FP_M = 2 ** 31 - 1          # a prime; every sum below stays far inside int64, so the arithmetic is exact
+FP_CHUNK = 1 << 22          # elements per pass: bounds the extra GPU memory to about 200 MB
+_WORD = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int32}
+
+
+def _fingerprint_piece(loc: torch.Tensor, off: tuple, shape: tuple) -> torch.Tensor:
+    """Two sums over the raw bits of this piece, each word weighted by its position in the FULL tensor."""
+    t = loc.detach().contiguous()
+    if t.dtype == torch.bool:
+        t = t.to(torch.uint8)
+    per = max(1, t.element_size() // 4)                     # 64-bit values are two 32-bit words
+    words = t.reshape(*t.shape, 1).view(_WORD[t.element_size()]).reshape(*t.shape, per) if t.dim() else \
+        t.reshape(1, 1).view(_WORD[t.element_size()]).reshape(per)
+    mask = (1 << (8 * min(t.element_size(), 4))) - 1
+    strides = [1] * len(shape)
+    for d in range(len(shape) - 2, -1, -1):
+        strides[d] = strides[d + 1] * shape[d + 1]
+    acc = torch.zeros(2, dtype=torch.int64, device=t.device)
+    rows = t.shape[0] if t.dim() else 1
+    per_row = max(1, words.numel() // max(rows, 1))
+    step = max(1, FP_CHUNK // per_row)
+    for r0 in range(0, rows, step):
+        w = (words[r0:r0 + step] if t.dim() else words).to(torch.int64) & mask
+        idx = torch.zeros(w.shape[:-1], dtype=torch.int64, device=t.device)
+        for d in range(t.dim()):                            # global element index, from the shard offset
+            ar = torch.arange(w.shape[d], dtype=torch.int64, device=t.device) + off[d] + (r0 if d == 0 else 0)
+            idx = idx + (ar * strides[d]).reshape([-1 if i == d else 1 for i in range(t.dim())])
+        gi = idx.unsqueeze(-1) * per + torch.arange(per, dtype=torch.int64, device=t.device)
+        w1 = gi % FP_M + 1
+        w2 = (gi * 48271) % FP_M + 1
+        acc[0] += ((w % FP_M) * w1 % FP_M).sum() % FP_M
+        acc[1] += ((w % FP_M) * w2 % FP_M).sum() % FP_M
+    return acc % FP_M
+
+
+def fingerprints(sd, keys=None) -> dict:
+    """{key: "h1-h2"} for the LOGICAL tensors, the same at any world size or sharding (ADR 0001 §8).
+
+    In simple words: every rank adds up its own piece, weighting each number by its place in the full tensor,
+    then one all-reduce adds the pieces. Moving pieces between ranks (resharding) cannot change the sum, but
+    any wrong or swapped number does. Integer sums on the GPU: milliseconds, not the minutes of a sha256."""
+    items = [(k, t) for k, t in tensor_items(sd) if keys is None or k in keys]
+    if not items:
+        return {}
+    dev = comm_device()
+    out = torch.zeros(len(items), 2, dtype=torch.int64, device=dev)
+    for i, (_, t) in enumerate(items):
+        loc, off, add = shard_place(t)
+        if add and loc.numel():
+            out[i] = _fingerprint_piece(loc, off, tuple(t.shape)).to(dev)
+    if dist.is_initialized():
+        dist.all_reduce(out, op=dist.ReduceOp.SUM)
+    out = (out % FP_M).tolist()
+    return {k: f"{a:08x}-{b:08x}" for (k, _), (a, b) in zip(items, out)}
 
 
 def state_digest(sd) -> str:
-    """sha256 over every tensor's raw bytes, in sorted key order. Equal digest = identical state."""
+    """One hash over every tensor's name, dtype, shape and fingerprint. Equal digest = identical state."""
     h = hashlib.sha256()
+    fp = fingerprints(sd)
     for k, t in tensor_items(sd):
-        h.update(k.encode())
-        h.update(str(t.dtype).encode())
-        h.update(str(tuple(t.shape)).encode())
-        h.update(tensor_bytes(t))
+        h.update(f"{k}|{t.dtype}|{tuple(t.shape)}|{fp[k]};".encode())
     return h.hexdigest()
 
 
@@ -200,7 +279,7 @@ def key_spec(sd) -> dict:
 
 
 def all_finite(sd) -> bool:
-    return all(torch.isfinite(t).all().item() for _, t in tensor_items(sd) if t.is_floating_point())
+    return all(torch.isfinite(local_part(t)).all().item() for _, t in tensor_items(sd) if t.is_floating_point())
 
 
 def device_class(model=None) -> str:
@@ -298,6 +377,9 @@ class Checkpointer:
         self.nvme_headroom = nvme_headroom
         # full: re-read and hash every object (tests, small checkpoints); head: trust S3's stored checksum
         self.verify_mode = verify_mode or os.environ.get("V5_VERIFY_MODE", "full")
+        # async (default where torch has it): the stall is only the GPU -> host copy (ADR 0001 §2)
+        self.async_save = hasattr(dcp, "async_save") and os.environ.get("V5_ASYNC_SAVE", "1") == "1"
+        self._group = None
         self._thread = None
         self._ok = True
         self.last_rank_bytes = 0
@@ -341,33 +423,56 @@ class Checkpointer:
                 emit("checkpoint.failed", step=step, cause="nvme_full", free_bytes=free, need_bytes=need)
             return False
 
-        dcp.save(state, checkpoint_id=local_dir)
+        # Every rank runs these: under FSDP a forward pass and the fingerprint are collectives, and a
+        # rank-0-only call would wait forever for the others.
+        digest = state_digest(state)
+        frozen = fingerprints(state, {f"model.{k}" for k in self.frozen_keys})
+        probe = float_bits(probe_fn(model))
+        ld = loader.state_dict()
+        loader_global = all_true(json.dumps(ld, sort_keys=True) == broadcast_obj(json.dumps(ld, sort_keys=True)))
+
+        # The stall ends when the state is copied to host memory. dcp.async_save does that copy, then writes
+        # the files from a background thread on its own gloo group (so it never shares NCCL with training).
+        fut = None
+        if self.async_save:
+            fut = dcp.async_save(state, checkpoint_id=local_dir, process_group=self._save_group())
+        else:
+            dcp.save(state, checkpoint_id=local_dir)
         extra = {"step": step, "tokens": tokens, "world_size": world(), "rank": rank(),
-                 "rng": rng_capture(), "loader": loader.state_dict()}
+                 "rng": rng_capture(), "loader": ld}
         with open(os.path.join(local_dir, f"extra_rank{rank()}.json"), "w") as f:
             json.dump(extra, f)
 
         meta = None
         if rank() == 0:
-            flat = flatten(state)
             meta = {
                 "schema": SCHEMA, "run_id": self.run_id, "branch": self.branch, "step": step,
                 "tokens": tokens, "world_size": world(), "reason": reason,
                 "env": env_manifest(self.config_path),
                 "keys": key_spec(state),
-                "state_digest": state_digest(state),
-                "frozen": {k: hashlib.sha256(tensor_bytes(flat[f"model.{k}"])).hexdigest()
-                           for k in self.frozen_keys},
-                "probe_loss": {device_class(model): float_bits(probe_fn(model))},
+                "state_digest": digest,
+                "frozen": {k[len("model."):]: v for k, v in frozen.items()},
+                "probe_loss": {device_class(model): probe},
                 "next_batch": loader.next_batch_id(),
+                # True: the data position is one global ledger offset, the same on every rank, so a restore
+                # at another world size is safe (loader_contract.py). False: resume only at this world size.
+                "loader_global": loader_global,
+                "async_save": fut is not None,
             }
         stall = t.s()
-        barrier()
         self._ok = True
         self._thread = threading.Thread(target=self._upload_and_commit,
-                                        args=(step, local_dir, meta, stall, waited), daemon=True)
+                                        args=(step, local_dir, meta, stall, waited, fut), daemon=True)
         self._thread.start()
         return True
+
+    def _save_group(self):
+        """A gloo group just for checkpoint writes, made once (every rank must make it together)."""
+        if not dist.is_initialized():
+            return None
+        if self._group is None:
+            self._group = dist.new_group(backend="gloo")
+        return self._group
 
     def _own_files(self, local_dir: str) -> list:
         r = rank()
@@ -375,11 +480,15 @@ class Checkpointer:
                  if n.startswith(f"__{r}_") or n == f"extra_rank{r}.json" or (r == 0 and n == ".metadata")]
         return sorted(names)
 
-    def _upload_and_commit(self, step, local_dir, meta, stall, waited):
+    def _upload_and_commit(self, step, local_dir, meta, stall, waited, fut=None):
         t_start = time.time()
         rel = self.step_rel(self.branch, step)
         st = self.store
         try:
+            tw = Timer()
+            if fut is not None:
+                fut.result()  # the async DCP write to this node's disk has finished (raises if it failed)
+            write_s = tw.s()
             tu = Timer()
             sums, nbytes = {}, 0
             delay = drill_value("upload_delay_s")
@@ -418,7 +527,7 @@ class Checkpointer:
             self.last_commit_step, self.last_commit_time = step, manifest["committed_at"]
             latency = round(time.time() - t_start, 4)
             emit("checkpoint.committed", step=step, branch=self.branch, reason=meta["reason"], stall_s=stall,
-                 backpressure_s=waited, commit_latency_s=latency, upload_s=upload_s, verify_s=verify_s,
+                 backpressure_s=waited, commit_latency_s=latency, write_s=write_s, upload_s=upload_s, verify_s=verify_s,
                  bytes=total, store=st.kind, upload_gbps=round(nbytes * 8 / 1e9 / max(upload_s, 1e-6), 4))
         except Exception as e:  # noqa: BLE001 - every failure must become an event, then the caller decides
             self._ok = False
@@ -543,7 +652,10 @@ class Checkpointer:
         dcp.load(target, checkpoint_id=local_dir)
         set_state_dict(model, optim, model_state_dict=target["model"], optim_state_dict=target["optim"])
         resharded = man["world_size"] != world()
-        extra_rank = 0 if resharded else rank()
+        if resharded and not man.get("loader_global", False):
+            raise ReshardError(f"step {c['step']} was saved at world size {man['world_size']} by a data loader "
+                               f"with per-rank positions; it can only resume at that world size, not {world()}")
+        extra_rank = 0 if resharded else rank()  # loader_global: every rank saved the same data position
         with open(os.path.join(local_dir, f"extra_rank{extra_rank}.json")) as f:
             extra = json.load(f)
         loader.load_state_dict(extra["loader"])
@@ -569,10 +681,10 @@ class Checkpointer:
         nb = loader.next_batch_id()
         if nb != man["next_batch"]:
             problems.append(f"next batch saved={man['next_batch']} restored={nb}")
-        flat = flatten(restored)
+        frozen_now = fingerprints(restored, {f"model.{k}" for k in man["frozen"]})
         for k, h in man["frozen"].items():
-            if hashlib.sha256(tensor_bytes(flat[f"model.{k}"])).hexdigest() != h:
-                problems.append(f"frozen tensor {k} hash differs")
+            if frozen_now.get(f"model.{k}") != h:
+                problems.append(f"frozen tensor {k} fingerprint differs")
         if not all_true(not problems):
             raise RestoreCheckError(f"step {c['step']}: " + "; ".join(problems or ["check failed on another rank"]))
         checks_s = tc.s()

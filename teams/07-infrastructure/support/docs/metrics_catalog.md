@@ -39,7 +39,7 @@ Generated from `metrics/catalog.yaml` by `python metrics/evaluate.py --render-md
 |---|---|---|---|---|---|---|---|---|---|
 | Q-01 | Main run not running (pending time) | s | above | — | 120 | 600 | The main run's nodes are paid for whether it runs or not. | squeue reason: no nodes (drained > spares?), held, or controller issue. | yes |
 | Q-02 | Main run held (exit 78 / crash loop) | count | above | — | — | 1 | Held means a person must act; until then the cluster burns money with no training. | Read the job.held cause; rollback or fix, then release. | yes |
-| Q-03 | Reschedule latency (job end to running again) | s | above | 60 | 120 | 600 | Time between the crash and the restart is pure loss. | Check the spare is up and idle (Q-08), and slurmctld load. | yes |
+| Q-03 | Reschedule latency (job end to running again) | s | above | 120 | 300 | 600 | Time between the crash and the restart is pure loss. Floor: cred_expire=60 + 1 s, so a normal restart is 85-95 s; LOW starts at 2x that floor. | Check the spare is up and idle (Q-08), and slurmctld load. | yes |
 | Q-04 | Crash-loop holds | count | above | — | 1 | — | A job crashed 3 times in 30 min and was stopped so it does not burn GPU hours in a loop. | Read the logs of the 3 crashes; for the main run this is also Q-02 (high). | yes |
 | Q-05 | Main-run interruptions per day | count/day | above | 2 | 5 | 10 | A rising rate means a bad node or bad code; each one costs ~interval/2 + MTTR. | Group incidents by node and cause_class; drain repeat offenders. | yes |
 | Q-06 | Idle GPU node-hours (up, no job) | node-h/day | above | 0.5 | 2 | 4 | An idle running GPU node costs the full hourly price for nothing. | Check SuspendTime / power saving; stop forgotten instances. | no |

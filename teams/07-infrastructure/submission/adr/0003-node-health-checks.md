@@ -66,7 +66,10 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 - Per GPU, from `nvidia-smi`: temperature; **ECC uncorrectable** (volatile and aggregate) and the correctable
   count (kept for a trend); hardware-slowdown throttle; PCIe link width against max.
 - Row remapping: pending (warn: reset needed) and failure (fail: replace the GPU).
-- `dcgmi diag -r 1` on GPU nodes in prolog/periodic mode when `dcgmi` exists; level 2 in `--mode full`.
+- `dcgmi diag -r 1` in prolog mode only (the GPUs are idle before a job) and level 2 in `--mode full`. Periodic
+  mode, which runs while training uses the GPUs, reads `dcgmi health -c` instead: DCGM's background watches,
+  no extra load. NVIDIA advises against `diag` on busy GPUs, and a false diag "fail" would drain the node and
+  requeue the main run over and over (review finding, week 1).
 - **Xid scan** (`health/xid_scan.py`): reads `journalctl -k` or `dmesg`, parses `NVRM: Xid (PCI:…): <code>`:
 
 | Class | Codes |
@@ -86,8 +89,8 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 
 | Mode | Use | Budget |
 |---|---|---|
-| `--mode prolog` | quick checks before every job | ≤ 30 s |
-| `--mode periodic` | Slurm `HealthCheckProgram`; drains and moves jobs on `fail` | ≤ 30 s |
+| `--mode prolog` | quick checks + `dcgmi diag -r 1` before every job | ≤ 30 s |
+| `--mode periodic` | Slurm `HealthCheckProgram`: quick checks + `dcgmi health -c` (never `diag`); drains and moves jobs on `fail` | ≤ 30 s |
 | `--mode full` | adds DCGM diag 2 and the all-reduce sweep, before dry runs and after a repair | ≤ 15 min |
 | `--report-only` | report, take no action | — |
 

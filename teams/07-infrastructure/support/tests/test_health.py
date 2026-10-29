@@ -74,6 +74,25 @@ def test_allreduce_exact_on_gloo(tmp_path):
     assert all(s["busbw_gbps"] > 0 for s in r["metrics"]["sizes"])
 
 
+def test_periodic_mode_never_runs_dcgm_diag(tmp_path, monkeypatch):
+    """diag loads the GPUs; on a training node a false fail would drain it and requeue the main run."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "dcgmi.log"
+    bin_dir.mkdir()
+    (bin_dir / "dcgmi").write_text(f'#!/bin/sh\necho "$@" >> {log}\necho \'{{"Overall Health": "Healthy"}}\'\n')
+    (bin_dir / "dcgmi").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("V5_EXPECT_GPUS", "8")
+    monkeypatch.setattr(health_check, "STATE_DIR", str(tmp_path))
+    fx = os.path.join(FIX, "nvidia_smi_bad.csv")
+    for mode in ("periodic", "prolog"):
+        health_check.main(["--mode", mode, "--report-only", "--nvidia-smi-fixture", fx, "--out", str(tmp_path / mode)])
+    calls = log.read_text().splitlines()
+    assert calls[:2] == ["health -s a", "health -c -j"]           # periodic: watches only
+    assert calls[2:] == ["diag -r 1 -j"]                          # prolog: the GPUs are idle
+    rep = json.load(open(tmp_path / "periodic"))
+    assert [c["status"] for c in rep["checks"] if c["name"] == "dcgm_health"] == ["pass"]
+
+
 def test_renamed_throttle_field_is_not_a_failure(monkeypatch):
     """Newer drivers reject clocks_throttle_reasons.*; the retry with clocks_event_reasons.* must be used, not
     reported as a broken GPU (that would drain healthy nodes)."""

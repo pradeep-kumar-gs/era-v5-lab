@@ -83,9 +83,14 @@ Not saved: gradients, activations, NCCL state.
 2. A NaN/Inf guard runs first: a bad state is never saved (exit 78).
 3. A free-space check: free NVMe must be ≥ 1.2 × this node's share of the last checkpoint, or the save is
    skipped with `checkpoint.failed cause=nvme_full` (alert CK-03).
-4. **Stall:** DCP writes each rank's shard to node-local NVMe. On GPU this becomes `dcp.async_save`, so the
-   stall is only the GPU-to-host copy into pinned host RAM.
-5. **Background:** each rank uploads its own files to `s3://…/<run>/<branch>/step_<N>/` through `ckpt/store.py`
+4. **Stall:** on **every rank together**: the NaN check, the state fingerprint (§8), the probe-batch loss and
+   the loader position. Under FSDP the probe forward and the fingerprint are collectives, so none of them may run
+   on rank 0 alone (it would wait forever for the others; review finding, week 1). Then `dcp.async_save` copies
+   each rank's shard to host RAM and returns: that copy is the end of the stall. DCP writes the files to
+   node-local NVMe from a background thread, on a separate **gloo** process group so it never shares NCCL with
+   training. The fingerprint is integer sums on the GPU (milliseconds); there is no sha256 of the state on the
+   stall path. `V5_ASYNC_SAVE=0` falls back to the blocking `dcp.save` (used to compare stall times).
+5. **Background:** each rank waits for its DCP write to finish, then uploads its own files to `s3://…/<run>/<branch>/step_<N>/` through `ckpt/store.py`
    (boto3: multipart above 64 MB, 16 parallel parts, standard retry mode for `503 SlowDown`). Each object
    carries its sha256 in metadata and S3 verifies a SHA256 checksum on upload. Then the rank writes
    `sums_rank<r>.json`.
@@ -181,7 +186,7 @@ Changed from the first draft, which used 1 for fatal: an uncaught Python error (
 
 | Team | Contract |
 |---|---|
-| 01/02 Data | the loader exposes `state_dict()` / `load_state_dict()` returning JSON-serialisable state, and `next_batch_id()` with a content hash of the next batch. The ledger offset is the authority on the data position |
+| 01/02 Data | the loader exposes `state_dict()` / `load_state_dict()` returning JSON-serialisable state, and `next_batch_id()` with a content hash of the next batch. The state is **one global ledger offset + the skip list, identical on every rank** (each rank derives its slice from it); no per-rank positions. Reason: after a resharded restore every new rank loads old rank 0's state. The checkpointer checks this at every save (`loader_global` in the manifest) and refuses to reshard a checkpoint that fails it (`ReshardError`, exit 78); `ckpt/loader_contract.py` tests it, including a resume at another world size |
 | 05 Architecture | every tensor is trainable, frozen or a buffer, with a stable name. The parallel layout is given: ZeRO/FSDP stage, expert-parallel size. **Experts are stored by global expert id** (DTensor or an explicit index), so the checkpoint reshards when the EP size changes. Reversible models keep dropout at 0 |
 | 04 KE2 | Kronecker tables and other non-trained tensors are declared frozen buffers and hashed in the manifest |
 | 05 + 06 Kernels | **every kernel has a deterministic mode**: no unordered atomics, a fixed reduction order, deterministic reversible recompute. Resume tests and the CI restore probe run in deterministic mode; production may run fast mode. A kernel without a deterministic mode is flagged in its docstring and in the manifest |
@@ -196,10 +201,10 @@ Changed from the first draft, which used 1 for fatal: an uncaught Python error (
 
 | Check | Rule |
 |---|---|
-| **State digest** | sha256 over the raw bytes of every tensor (weights, optimizer, buffers) in sorted key order, at save and after restore; **must be equal**. After resharding it is computed on the logical tensors, so it still must be equal |
+| **State digest** | a fingerprint of every **logical** tensor (weights, optimizer, buffers): two sums mod 2³¹−1 over the raw bits, each word weighted by its position in the full tensor. Each rank adds its own shard (DTensor offset from its placement; a replicated or DDP copy is added once), then one all-reduce. The sum does not depend on how the tensor is split, so it **must be equal** at the same and at another world size. Then one sha256 over name, dtype, shape and fingerprint of every key. A moved, swapped or flipped value changes it (T14, T17) |
 | **Probe loss** | loss of one fixed held-out probe batch, in deterministic mode, stored **per device class** (`cpu`, `cuda:<model>`) because CPU and GPU arithmetic differ; compared as raw float bits, not rounded |
 | **Next batch** | `next_batch_id()` and its content hash equal the saved ones |
-| **Frozen hashes** | each equals the manifest |
+| **Frozen hashes** | the same logical fingerprint of each frozen tensor equals the manifest |
 
 Any failure prints both values, emits `restore.failed`, and the next attempt uses the previous commit.
 
@@ -269,6 +274,10 @@ Bad and accepted:
 | T11 | loss × 10 for 5 steps (no NaN): no save during the spike, exit 78, `latest` before the spike | pass |
 | T12 | 300 normal steps never trip the spike guard | pass |
 | T13 | the data-loader contract (`ckpt/loader_contract.py`) that Teams 01/02's real loader must pass | pass |
+| T14 | fingerprint of a tensor split into uneven row shards (FSDP) or column shards (tensor parallel), for fp32/bf16/fp64/bool/int64 = fingerprint of the full tensor; a swapped row or one flipped bit changes it | pass |
+| T15 | a loader whose state differs per rank fails the contract ("must be one global ledger offset") | pass |
+| T16 | **FSDP2** (`fully_shard`) on 2 GPUs: save does not hang; restore at 2 ranks and resharded at 1 rank pass every check | GPU only: runs on Kaggle 2×T4 |
+| T17 | real DTensors on 2 and 3 gloo ranks (uneven `Shard(0)`, `Shard(1)`, `Replicate`): digest = single-process digest | pass |
 
 Simulation drills that exercise the checkpoint in Slurm (ADR 0002 §10): kill **during** a save (the half-uploaded
 checkpoint is never used), kill **during** a restore (the next attempt restores the same checkpoint cleanly),
@@ -282,8 +291,9 @@ model of the final shape.
 
 ## Open points
 
-- **Not tested yet:** truly sharded state. The test trainer uses DDP, where every rank holds a full copy, so
-  "4 ranks → 2" is the easy case. FSDP/ZeRO-3 and expert-parallel resharding need Team 05's model (week 2).
+- **Sharded state, partly tested:** the digest is checked on real DTensor shards (T17, CPU) and the whole save →
+  reshard → restore path under FSDP2 runs as T16 on Kaggle 2×T4. Expert parallel and Team 05's real model wait
+  for week 2. FSDP2 needs CUDA in torch 2.5, so the Docker cluster (CPU) still trains with DDP.
 - Real S3 throughput and `head` verification on a multi-GB checkpoint (week-2 node; the emulator is in-memory).
 - Parallel layout: ZeRO-2 on 32 GPUs or ZeRO-3 on 8, and the EP degree. This sets the per-node share and the NVMe size.
 - Protected cadence N (Team 09).

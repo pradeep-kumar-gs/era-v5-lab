@@ -5,23 +5,23 @@ the GPU-only parts on Kaggle's free 2-GPU machine. Total time is about 20–30 m
 
 ## Steps
 
-1. kaggle.com → **Create → New Notebook**.
-2. Right panel → **Settings**: *Accelerator* = **GPU T4 x2**, *Internet* = **on** (phone verification needed once).
-3. Get the code into the notebook. Pick one:
-   - the branch is pushed to GitHub:
-     ```
-     !git clone -b infrastructure --depth 1 https://github.com/<your-fork>/era-v5-lab.git
-     %cd era-v5-lab
-     ```
-   - or zip `teams/07-infrastructure`, upload it as a Kaggle **Dataset**, add it to the notebook, then
-     `!cp -r /kaggle/input/<dataset>/07-infrastructure /kaggle/working/ && cd /kaggle/working`
-     and run the script from there (the path below changes to `07-infrastructure/support/kaggle/...`).
-4. Run one cell:
+1. Build the package (on the laptop, from `teams/07-infrastructure`):
    ```
-   !python teams/07-infrastructure/support/kaggle/run_gpu_checks.py
+   python3 support/kaggle/make_package.py
    ```
-5. Download `/kaggle/working/gpu_results/summary.md` and `summary.json` (Output panel, right side), and add
-   them to `teams/07-infrastructure/support/kaggle/results/`. The `*.log` files there help if a step failed.
+   It writes `support/kaggle/dist/v5-infra-kaggle.zip` (the team folder, ~210 KB) and
+   `support/kaggle/dist/v5_gpu_checks.ipynb`. `dist/` is ignored by git, because the repo does not allow zips.
+2. kaggle.com → **Datasets → New Dataset** → upload `v5-infra-kaggle.zip` (Kaggle unzips it) → Create.
+3. kaggle.com → **Code → New Notebook → File → Import Notebook** → pick `v5_gpu_checks.ipynb`.
+4. Right panel: **Accelerator = GPU T4 x2** (phone verification needed once); **Add Input** → your Dataset.
+5. **Run all**. Cell 1 copies the code to `/kaggle/working` (the input folder is read-only); cell 3 runs
+   `run_gpu_checks.py` (20–30 min); cell 4 shows `summary.md` and packs `gpu_results.zip`.
+6. Output panel → download `gpu_results.zip` → unzip into `teams/07-infrastructure/support/kaggle/results/`.
+   Bring back `summary.md` and `summary.json`; the `*.log` files only help if a step failed.
+
+No Dataset? Turn **Internet = on** instead (needs a phone-verified Kaggle account): cell 1 then clones the
+pushed `infrastructure` branch. The notebook file does not ask for Internet itself; if it did, the import would
+fail with `Permission 'kernelSessions.enableInternet' was denied` on an unverified account.
 
 No AWS keys, tokens or personal data are used or written.
 

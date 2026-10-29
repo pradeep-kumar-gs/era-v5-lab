@@ -38,6 +38,8 @@ Raw trainer exit codes (before the wrapper maps them to 75, or 78 after 3 crashe
 | `IntegrityError` | high | A checkpoint file does not match its sha256: damaged on disk, network or S3. | the damaged checkpoint is never used; a restore falls back to the previous commit | pin the last good checkpoint (ckpt.py pin); find the hop that corrupts data | CK-04 |
 | `RestoreCheckError` | high | The restored state is not the saved state (digest, probe loss, next batch or frozen hashes differ). | the job fell back to the previous commit | compare the two printed values in the job log; do not continue on that checkpoint | CK-05 |
 | `UploadTimeout` | medium | A rank did not finish its S3 upload in time. | save not committed; training continues | check S3 errors and upload throughput (CK-11) | CK-03 |
+| `ReshardError` | high | The checkpoint was saved by a data loader that keeps a separate position per rank. At another world size those positions do not map to the new ranks, so data would repeat or be skipped. | restore refused before any step; nothing was lost | resubmit at the saved world size (the job log names it), or fix the loader to keep one global ledger offset (ckpt/loader_contract.py) | CK-06 |
+| `crash_ledger_unavailable` | medium | The crash was retried, but the crash count could not be written to the run's S3 folder, so the 3-in-30-min crash-loop cap is not counting. | job requeued as a normal crash | check S3 access from the batch node (the same fault usually also fails checkpoint uploads) | CK-03 |
 
 ## Node drain reasons (`sinfo -R` shows `v5:<names>`)
 
@@ -50,6 +52,7 @@ Raw trainer exit codes (before the wrapper maps them to 75, or 78 after 3 crashe
 | `remapped_rows` | GPU memory row remap failed (or is pending a reset). | node drained on failure | failure: replace; pending: reset the GPU / reboot |
 | `xid` | The GPU driver logged a fatal Xid error (79 off the bus, 94/95 memory, …). | node drained, jobs saved and moved | replace the instance; the Xid code is in the health report |
 | `dcgm_diag` | NVIDIA's diagnostic failed. | node drained | replace the instance |
+| `dcgm_health` | DCGM's background health watch reports a GPU failure (PCIe, memory, NVLink, thermal or power). | node drained; its jobs saved and moved | run `health_check.py --mode full`; replace if it fails again |
 | `gpu_temperature` | A GPU is at its slowdown temperature. | node drained | check cooling; replace if repeated |
 | `nvme_free` | Local disk too full for the next checkpoint. | node drained | clean /nvme, then `scontrol update nodename=<n> state=resume` |
 | `clock_offset` | The node clock is off by more than 100 ms. | node drained | fix chrony (Amazon Time Sync), then resume the node |

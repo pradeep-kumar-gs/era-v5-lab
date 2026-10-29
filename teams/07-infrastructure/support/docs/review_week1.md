@@ -18,8 +18,9 @@ computation) and one eval/CPU node. The main run uses 2 nodes × 2 ranks; the th
 tiny model trains at about 50 ms per step and saves every 8 s. Latest results: [sim_results.md](sim_results.md).
 The kit lives in `support/simulation/` (optional; see [support/simulation/README.md](../simulation/README.md)).
 
-**Latest full run (run 10, 28 Oct 2026): 31 of 31 drills pass in 21 minutes**, from the `submission/` + `support/`
-layout (run 9: 31 of 31, adds `held_job_explains_itself`; run 8: 30 of 30).
+**Latest full run (run 11, 29 Oct 2026): 31 of 31 drills pass in 30 minutes**, with every fix from the
+week-1 check-in review (§2b): async save, logical fingerprints, crash count in S3, node-local logs,
+`cred_expire=60` (run 10: 31 of 31 on the new layout; run 9 adds `held_job_explains_itself`; run 8: 30 of 30).
 
 | Fault injected | What happened | MTTR p50 (n) | Work lost |
 |---|---|---|---|
@@ -40,10 +41,11 @@ Also passing: accounts (no account → rejected), preemption of team jobs (they 
 fair share, GPU-minutes per account (main run 32.4 GPU-min in run 9), retention on S3 (no protected checkpoint deleted), safetensors export
 (bit-equal probe), live alerts (23 fired, including every drill-caused HIGH).
 
-**Why MTTR is ≈ 50–60 s now (it was 3–57 s in run 3):** most of it is Slurm's requeue wait. Our earlier
-"restart immediately" fix lost the main run in run 7 (see §2), so we now use Slurm's supported setting
-`cred_expire=30`. About 50 s per restart is the price of never losing the run; at 8 nodes that is ≈ $13 per
-restart (assumed prices), small next to the work lost per failure.
+**Why MTTR is ≈ 85 s now (it was 3–57 s in run 3):** most of it is Slurm's requeue wait. Our earlier
+"restart immediately" fix lost the main run in run 7 (see §2), so we use Slurm's supported setting
+`cred_expire`. Run 10 used 30 s (MTTR ≈ 55 s); the review showed that leaves no margin for a 30 s prolog, so
+run 11 uses 60 s (reschedule 90 s, MTTR 85 s). About 90 s per restart is the price of never losing the run; at
+8 nodes that is ≈ $23 per restart (assumed prices), small next to the work lost per failure.
 
 Reporting gap found in run 8 and closed in run 9: GPU-minutes counted only the last segment of each requeued job
 (`sacct` without `-D`), so `mainrun` showed 0.2 GPU-minutes. With `-D`, run 9 shows 32.4.
@@ -57,7 +59,7 @@ projects onto real failure rates.
 
 | Found | Effect | Fix | Status |
 |---|---|---|---|
-| Slurm holds every requeued job ≈ 121 s (`BeginTime`) | ≈ 2 min of the whole cluster idle on every restart | `AuthInfo=cred_expire=30` (≈ 50 s, safe) | FIXED + TESTED |
+| Slurm holds every requeued job ≈ 121 s (`BeginTime`) | ≈ 2 min of the whole cluster idle on every restart | `AuthInfo=cred_expire=60` (≈ 90 s, safe, prolog margin; was 30 s ≈ 50 s) | FIXED + TESTED |
 | our first fix for that (force an immediate start) | run 7: the job started while the old credential was valid, Slurm killed it ("credential revoked") and marked it FAILED: **main run lost** | hack removed; replaced by the row above | FIXED + TESTED |
 | `OMP_NUM_THREADS` changes the loss bits on CPU | a bit-equal restore check fails for the wrong reason | set in job scripts; recorded in the manifest | FIXED + TESTED |
 | torchrun turns a stop signal into exit 1 | preemption counted as a crash | trainers run under `srun` | FIXED + TESTED |
@@ -70,6 +72,22 @@ projects onto real failure rates.
 | catalog: an unquoted comma in two metric names (CK-05, Q-06) broke their YAML entry | names cut short in pages | quoted; test added | FIXED + TESTED |
 | health: on new drivers the renamed-field retry was ignored | a healthy GPU node reported "nvidia-smi failed" and drained | retry result used; test added | FIXED + TESTED |
 | report: test-caused alerts not marked | readers think production is broken | column "Caused by the test?" (yes / fault rate / no) | FIXED + TESTED |
+
+## 2b. Findings from the week-1 check-in review, and what changed
+
+The review read the code against the ADRs. Each finding was right; none showed up in the simulation, because the
+test trainer uses DDP (every rank holds a full copy) and the Docker cluster shares one `/s3` volume.
+
+| # | Finding | Fix | Proof | Status |
+|---|---|---|---|---|
+| R1 | Save deadlocks under FSDP: the probe forward and the digest ran on rank 0 only | every rank runs the probe, the fingerprint and the loader check together, before the async copy (`ckpt.py` `save`) | T16: FSDP2 save + restore on 2 GPUs (Kaggle); T17: sharded digest on gloo | **FIXED**; T17 tested, T16 runs on Kaggle |
+| R2 | Digest covered only rank 0's shard, so it would fail after any reshard | logical fingerprint: each rank adds its shard weighted by position in the full tensor, one all-reduce; the same at any world size (ADR 0001 §8) | T14 (uneven rows, columns, 5 dtypes, swapped row, one bit), T17 (real DTensors, 2 and 3 ranks) | **FIXED + TESTED** |
+| R3 | Async save claimed, blocking `dcp.save` used; sha256 of the whole state on the stall path | `dcp.async_save` on its own gloo group; the stall ends at the host copy; integer fingerprint on the GPU replaces sha256 (`V5_ASYNC_SAVE=0` for the old path) | all checkpoint tests and every drill run with it; stall on T4 from `bench_save.py` on Kaggle | **FIXED + TESTED** (GPU stall number: Kaggle) |
+| R4 | "No shared FS" but logs, events and the crash counter needed `/s3` | crash count → `crashes.json` in the run's S3 folder, rewritten whole (no append); logs/events/exit notes → node-local `/var/log/v5`, shipped by the log agent | `test_queue.py` (count survives 3 different nodes, no append, S3 down → retry + event); crash-loop drill in run 11 against the S3 emulator | **FIXED + TESTED** |
+| R5 | `dcgmi diag -r 1` ran every 30 s on busy GPUs: a false fail requeues the main run in a loop | periodic mode reads `dcgmi health -c` (DCGM's watches, no load); diag only in prolog (idle GPUs) and full mode | `test_health.py`: periodic calls only `health -s a` / `health -c -j`, prolog calls `diag -r 1` | **FIXED + TESTED** (real DCGM: week-2 node) |
+| R6 | A resharded restore gives every rank rank 0's loader state: wrong for per-rank loaders | contract now requires one global ledger offset, identical on every rank, and tests a resume at another world size; every save records `loader_global`; a resharded restore without it stops with `ReshardError` (78) and says what to do | T13 (our loader passes, also resharded), T15 (a per-rank loader fails) | **FIXED + TESTED** |
+| C1 | `SuspendExcNodes=gpu-[1-9]:1` may count busy nodes, so no spare is kept | not depending on it: `job_queue.py keep-spare` every minute names the spare node (`SuspendExcNodes=<node>`) and boots one if none is free; `ReconfigFlags=KeepPowerSaveSettings` | `test_queue.py` (busy main-run nodes are never the spare; nothing free → power up); man page checked: says "powered up", silent on busy | **FIXED**; unit-tested, real power saving needs EC2 |
+| C2 | `cred_expire=30` with a 30 s prolog budget leaves no margin | `cred_expire=60` (2 × prolog budget); man page: the lifetime must cover "run prolog" | run 11: 31 of 31, every requeue succeeds; reschedule 57 → 90 s, MTTR 55 → 85 s; Q-03 LOW raised 60 → 120 s so a normal restart does not alert | **FIXED + TESTED** |
 
 ## 3. Questions the instructor may ask, and our answer
 

@@ -231,6 +231,75 @@ def test_t12_no_false_spike(env):
     assert not env.events_named("train.loss_spike")
 
 
+@pytest.mark.skipif(DEVICE != "cuda" or MAX_WORLD < 2, reason="FSDP2 needs 2 CUDA GPUs (runs on Kaggle 2xT4)")
+def test_t16_fsdp_save_and_reshard(env):
+    """Weights and optimizer sharded with FSDP2: saving must not hang (every rank joins the probe forward and
+    the fingerprint), and the logical digest must match at the same AND at another world size (ADR 0001 §8)."""
+    env.run("--run-id", "fs", "--steps", 10, "--interval-s", 999, "--fsdp", world=2, check=0)
+    env.run("--run-id", "fs", "--steps", 14, "--interval-s", 999, "--fsdp", world=2, check=0)
+    env.run("--run-id", "fs", "--steps", 18, "--interval-s", 999, world=1, check=0)
+    done = [e for e in env.events_named("restore.done") if e["run_id"] == "fs"]
+    assert [(d["step"], d["saved_world"], d["world"], d["resharded"]) for d in done] == \
+        [(10, 2, 2, False), (14, 2, 1, True)]
+    assert not env.events_named("restore.failed")
+    man = env.store("fs").get_json(env.latest("fs")["path"] + "/MANIFEST.json")
+    assert man["loader_global"] and man["schema"] == "v5-ckpt/2"
+
+
+@pytest.mark.parametrize("world", [2, 3])
+def test_t17_dtensor_digest_equals_full_digest(tmp_path, world):
+    """Real DTensors on gloo (CPU): rows split unevenly, columns split, a replicated scalar."""
+    w = os.path.join(HERE, "dtensor_digest_worker.py")
+    env = {k: v for k, v in os.environ.items() if k not in ("RANK", "WORLD_SIZE", "LOCAL_RANK")}
+    subprocess.run([sys.executable, w, str(tmp_path / "one.json")], env=env, check=True, timeout=120)
+    p = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={world}",
+                        w, str(tmp_path / "many.json")], env=env, capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr[-3000:]
+    assert json.load(open(tmp_path / "many.json"))["digest"] == json.load(open(tmp_path / "one.json"))["digest"]
+
+
+def test_t14_fingerprint_is_the_same_at_any_sharding():
+    """ADR 0001 §8: the digest is on the LOGICAL tensors. Shards added up = the full tensor, for any split."""
+    import torch
+    from ckpt.ckpt import FP_M, _fingerprint_piece
+
+    def fp(t):
+        return tuple(_fingerprint_piece(t, (0,) * t.dim(), tuple(t.shape)).tolist())
+
+    def split(t, dim, parts):
+        acc, off = torch.zeros(2, dtype=torch.int64), 0
+        for piece in torch.tensor_split(t, parts, dim=dim):          # uneven pieces, like FSDP's last shard
+            o = [0] * t.dim()
+            o[dim] = off
+            acc += _fingerprint_piece(piece, tuple(o), tuple(t.shape))
+            off += piece.shape[dim]
+        return tuple((acc % FP_M).tolist())
+
+    g = torch.Generator().manual_seed(0)
+    full = torch.randn(13, 7, generator=g)
+    for t in (full, full.to(torch.bfloat16), full.double(), (full > 0), torch.arange(91).reshape(13, 7)):
+        assert split(t, 0, 4) == fp(t)                                # FSDP: rows, 4 ranks
+        assert split(t, 1, 3) == fp(t)                                # tensor parallel: columns
+    swapped = full.clone()
+    swapped[[0, 1]] = swapped[[1, 0]]
+    assert fp(swapped) != fp(full)                                    # same numbers, wrong place: caught
+    flipped = full.clone()
+    flipped.view(torch.int32)[5, 3] ^= 1                              # one bit
+    assert fp(flipped) != fp(full)
+    assert fp(torch.tensor(3.0)) == fp(torch.tensor(3.0)) != fp(torch.tensor(3.5))   # scalars (optimizer step)
+
+
+def test_t15_loader_with_per_rank_state_fails_the_contract():
+    from ckpt.loader_contract import check
+
+    class PerRank(SyntheticLoader):
+        def state_dict(self):
+            return dict(super().state_dict(), rank_rows=self.position * 8 // self.world * (self.rank + 1))
+
+    probs = check(lambda r, w: PerRank(SEED, 8, r, w))
+    assert any("global ledger offset" in p for p in probs)
+
+
 def test_t13_loader_contract():
     """The synthetic loader passes the contract that Teams 01/02's real loader must pass."""
     from ckpt.loader_contract import check

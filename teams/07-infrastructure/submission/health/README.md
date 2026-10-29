@@ -78,7 +78,8 @@ Two details that are easy to get wrong (both found while designing and testing):
 | PCIe link width | `nvidia-smi` | — | below max (e.g. x8 of x16) |
 | Row remapping | `nvidia-smi` | remap failed (replace the GPU) | remap pending (reset needed) |
 | **Xid errors** | kernel log (`journalctl -k` / `dmesg`) | fatal codes | warn and unknown codes |
-| DCGM diag | `dcgmi diag -r 1` (level 2 in full) | any failure | — |
+| DCGM diag | `dcgmi diag -r 1` in prolog only (level 2 in full): it loads the GPUs, so never during training | any failure | — |
+| DCGM health | `dcgmi health -c` in periodic mode: reads DCGM's background watches, no load | `Failure` | `Warning`, or the tool errored |
 | Clock offset | `chrony` | > 100 ms | > 50 ms |
 | Free NVMe | disk | < need (≥ 1.2 × this node's checkpoint share) | — |
 | Host memory | `/proc/meminfo` | — | below the pinned-memory need for async saves |
@@ -178,7 +179,7 @@ Hooked into Slurm by `../slurm/prolog.sh` (before each job) and `../slurm/health
 From `submission/` (fixtures are in the optional `support/` folder):
 
 ```bash
-# state and events go to /var/lib/v5-health and /s3/events by default; point them somewhere writable
+# state and events go to /var/lib/v5-health and /var/log/v5/events by default; point them somewhere writable
 export V5_HEALTH_STATE=/tmp/v5-health V5_EVENTS_DIR=/tmp/v5-events
 
 # report only, never drains (safe anywhere). On a laptop the GPU checks are "skipped", and because 8 GPUs

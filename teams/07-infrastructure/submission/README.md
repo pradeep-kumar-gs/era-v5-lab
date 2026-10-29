@@ -3,7 +3,7 @@
 What we deliver: the infrastructure that runs the V5 main run on **AWS EC2 GPU nodes, scheduled by Slurm**. It
 is designed so that **money already spent on training is never lost**. It comes with LOW / MEDIUM / HIGH
 metrics that tell people what to do. Every decision is explained in simple words. Everything here was proven
-in a Docker copy of the Slurm cluster (31 of 31 drills). That evidence is in the optional
+in a Docker copy of the Slurm cluster (31 of 31 drills, run 11 after the week-1 review fixes). That evidence is in the optional
 [`../support/`](../support/README.md) folder.
 
 > **In simple words.** Training costs money every hour, and at this scale machines break every few hours.
@@ -59,7 +59,7 @@ python metrics/explain.py 78           # or 137, loss_spike, CK-05, v5:xid, JobH
 | Exit | Means | You do |
 |---|---|---|
 | 0 | done | nothing |
-| 75 | saved (or crashed once), restarts by itself in ~50 s | nothing |
+| 75 | saved (or crashed once), restarts by itself in ~90 s | nothing |
 | 78 | **held on purpose**: retrying would waste GPU hours | read the job comment; it says what to do |
 
 Full guide: [metrics/README.md](metrics/README.md).
@@ -74,6 +74,8 @@ starting with `support/` point to the optional folder next to this one.
 
 - Real GPUs: the Kaggle 2×T4 run is ready, not yet run; B200 numbers come in week 2.
 - AWS account: EFA, Pyxis/Enroot, power-saving scripts, IAM roles, AWS Budgets, real S3 speed.
-- Truly sharded state (FSDP/ZeRO-3, expert parallel) needs Team 05's model; the real data loader must pass
-  `ckpt/loader_contract.py` (Teams 01/02).
+- Sharded state: the digest is tested on real DTensor shards (CPU) and FSDP2 save/reshard/restore runs on
+  Kaggle 2×T4 (T16); expert parallel needs Team 05's model; the real data loader must pass
+  `ckpt/loader_contract.py` (Teams 01/02), now including "one global ledger offset".
+- The week-1 review findings and their fixes: [review_week1.md §2b](../support/docs/review_week1.md).
 - Prices in `metrics/prices.yaml` are assumptions until checked; on-call rota and alert channel need people.

@@ -564,6 +564,7 @@ def write_summary(summary):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep-up", action="store_true", help="leave the cluster running afterwards")
+    ap.add_argument("--only", nargs="+", metavar="DRILL", help="run only these drills (debugging; no summary written)")
     a = ap.parse_args()
     if not shutil.which("docker"):
         sys.exit("docker is needed")
@@ -578,9 +579,14 @@ def main():
              ("node_loss", d_node_loss), ("ctld_failover", d_ctld_failover), ("db_backup", d_db_backup),
              ("nan", d_nan_rollback_reshard), ("budget", d_budget_fairshare), ("retention", d_retention_export),
              ("live_alerts", d_live_alerts)]
+    if a.only:
+        plan = [(n, f) for n, f in plan if n in a.only]
     for name, fn in plan:
         log(f"--- drill: {name}")
         run_drill(name, fn)
+    if a.only:
+        log(f"{sum(r['pass'] for r in results)}/{len(results)} selected drills passed (no summary written)")
+        return 0 if all(r["pass"] for r in results) else 1
     ctl("scancel -u svc; true")
     log("evaluating metrics")
     p = ctl(f"cd /opt/v5/submission && {PY} metrics/evaluate.py --events /s3/events --out /s3/report "

@@ -131,6 +131,20 @@ CAUSES = {
         title="upload timeout", severity="medium",
         meaning="A rank did not finish its S3 upload in time.", auto="save not committed; training continues",
         you_do="check S3 errors and upload throughput (CK-11)", alert="CK-03"),
+    "ReshardError": dict(
+        title="cannot resume at this size: held", severity="high",
+        meaning="The checkpoint was saved by a data loader that keeps a separate position per rank. At another "
+                "world size those positions do not map to the new ranks, so data would repeat or be skipped.",
+        auto="restore refused before any step; nothing was lost",
+        you_do="resubmit at the saved world size (the job log names it), or fix the loader to keep one global "
+               "ledger offset (ckpt/loader_contract.py)", alert="CK-06"),
+    "crash_ledger_unavailable": dict(
+        title="crash count not stored", severity="medium",
+        meaning="The crash was retried, but the crash count could not be written to the run's S3 folder, so "
+                "the 3-in-30-min crash-loop cap is not counting.",
+        auto="job requeued as a normal crash",
+        you_do="check S3 access from the batch node (the same fault usually also fails checkpoint uploads)",
+        alert="CK-03"),
 }
 
 # ------------------------------------------------------------------ node drain reasons (sinfo -R shows "v5:<names>")
@@ -148,6 +162,8 @@ DRAIN = {
     "xid": ("The GPU driver logged a fatal Xid error (79 off the bus, 94/95 memory, …).",
             "node drained, jobs saved and moved", "replace the instance; the Xid code is in the health report"),
     "dcgm_diag": ("NVIDIA's diagnostic failed.", "node drained", "replace the instance"),
+    "dcgm_health": ("DCGM's background health watch reports a GPU failure (PCIe, memory, NVLink, thermal or power).",
+                    "node drained; its jobs saved and moved", "run `health_check.py --mode full`; replace if it fails again"),
     "gpu_temperature": ("A GPU is at its slowdown temperature.", "node drained", "check cooling; replace if repeated"),
     "nvme_free": ("Local disk too full for the next checkpoint.", "node drained",
                   "clean /nvme, then `scontrol update nodename=<n> state=resume`"),
@@ -189,7 +205,7 @@ def lookup(cause: str) -> dict:
 # the notes after srun returns. Without a note the wrapper still works, but can only report the bare exit code.
 
 def _runs_dir(run_id: str = None) -> str:
-    return os.path.join(os.environ.get("V5_RUNS_DIR", "/s3/runs"), run_id or os.environ.get("RUN_ID", "run"))
+    return os.path.join(os.environ.get("V5_RUNS_DIR", "/var/log/v5/runs"), run_id or os.environ.get("RUN_ID", "run"))
 
 
 def write_exit_note(code: int, cause: str, step: int = None, detail: str = "", rank: int = 0) -> None:

@@ -11,11 +11,11 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/s3/logs/%x-%j.out
+#SBATCH --output=/var/log/v5/logs/%x-%j.out
 set -u
 source /etc/v5/node.env 2>/dev/null || true
 export RUN_ID="${RUN_ID:-team-$SLURM_JOB_ID}"
-export V5_EVENTS_DIR="${V5_EVENTS_DIR:-/s3/events}"
+export V5_EVENTS_DIR="${V5_EVENTS_DIR:-/var/log/v5/events}"
 export OMP_NUM_THREADS=1                       # part of the bit-equal environment (ADR 0001 §1)
 export V5_DEVICE="${V5_DEVICE:-cuda}"           # node.env sets cpu in the Docker test
 export V5_DRILL_DIR="/s3/drills/$RUN_ID"           # test-only hooks; the folder does not exist in production

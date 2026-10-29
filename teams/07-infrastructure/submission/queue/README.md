@@ -45,8 +45,8 @@ restarts typed by hand.
 
 - **Main run** on on-demand or a Capacity Block, **never spot**, plus **one hot spare** node.
 - The **hot spare is not idle**: it runs team jobs that the main run preempts when it needs the node.
-- **Idle nodes are stopped** (`State=CLOUD`, `SuspendTime=600`), except exactly one spare. This replaces V4's
-  "idle alarm".
+- **Idle nodes are stopped** (`State=CLOUD`, `SuspendTime=600`), except exactly one spare, which
+  `job_queue.py keep-spare` names every minute (and boots, if none is free). This replaces V4's "idle alarm".
 - **GPUs are a counted resource (gres)**. A job that asks `--gpus-per-node=8` gets exactly 8, sees only those
   (`CUDA_VISIBLE_DEVICES`), and its GPU-hours are recorded against its account.
 
@@ -105,7 +105,8 @@ sbatch slurm/mainrun.sbatch
   human input.
 - **The wrapper** (`job_queue.py run`) maps every trainer outcome to 0, 75 or 78, applies the **crash-loop cap**
   (3 crashes in 30 min → hold: retrying a broken job just burns money), and writes `job.started / ended /
-  requeued / held` events.
+  requeued / held` events. The crash times are one object, `crashes.json`, in the run's S3 folder: a requeued
+  job starts on any node, so the count cannot live on a node's disk, and S3 cannot append to a file.
 - **Every job says why it stopped, in plain words**, where people look: the Slurm job comment
   (`squeue -o "%.10i %.12T %.20r %k"`), a banner at the end of the job log, and the events. For example
   `V5 HELD (78): loss spike: held at step 5880. Explain: python metrics/explain.py loss_spike. Do: roll back …`.
@@ -122,14 +123,16 @@ sbatch slurm/mainrun.sbatch
 
 - A node that stops answering for **30 s** (`SlurmdTimeout`) is marked DOWN and its job is requeued.
 
-### Why a restart takes ~50 s
+### Why a restart takes ~90 s
 
 Slurm will not restart a requeued job until the old job's launch credential has expired (`cred_expire` + 1 s;
-the default is ~121 s). We set **`AuthInfo=cred_expire=30`**: measured ~52 s from exit to running, every time.
+the default is ~121 s). We set **`AuthInfo=cred_expire=60`**: measured ~90 s from exit to running (run 11),
+every requeue succeeded. Week 1 used 30 s (~52 s), but the credential must also outlive the prolog (budget 30 s),
+so the review asked for margin: 60 s is twice the prolog budget.
 
 > **Lesson from simulation run 7.** We first forced an immediate restart (~4 s). Sometimes the job started
 > while the old credential was still valid; Slurm killed it ("Job credential revoked") and marked it
-> **FAILED**: the main run was lost. We removed that trick. ~50 s per restart (~$13 on 8 nodes at assumed
+> **FAILED**: the main run was lost. We removed that trick. ~90 s per restart (~$23 on 8 nodes at assumed
 > prices) is the price of never losing the run.
 
 ### When there are not enough nodes
@@ -160,6 +163,7 @@ operator can restart it on fewer nodes (`sbatch --nodes=1 …`); the rollback dr
 | `job_queue.py spot-watch` | runs on every node: polls the AWS spot warning (IMDSv2) every 5 s; drains the node and asks its jobs to save |
 | `job_queue.py drain <reason> [--node N]` | takes a node out of service; its jobs save and move (also used by the health check) |
 | `job_queue.py status` | every job and every drained node, each explained in plain words |
+| `job_queue.py keep-spare` | controller, every minute (`slurm/v5-keep-spare.timer`): sets `SuspendExcNodes` to the spare node by name; powers one up if no GPU node is free |
 
 It is not called `queue.py` on purpose: that name would hide Python's own `queue` module, which boto3 and
 threads use.
@@ -169,7 +173,8 @@ threads use.
 | File | What it does |
 |---|---|
 | `slurm.conf` | **shared** by Docker and EC2: controllers, accounting, priorities, preemption, requeue codes, health hooks, gres |
-| `nodes.ec2.conf` | EC2 node and partition lines (`p6-b200`, `State=CLOUD`, one spare kept up) |
+| `nodes.ec2.conf` | EC2 node and partition lines (`p6-b200`, `State=CLOUD`, the spare named by `keep-spare`) |
+| `v5-keep-spare.service`, `.timer` | systemd units on the controller: run `job_queue.py keep-spare` every minute |
 | `site.ec2.conf`, `cgroup.ec2.conf`, `gres.ec2.conf` | EC2 only: cgroup enforcement (a job uses only its own cores, memory, GPUs), GPU discovery through NVML |
 | `mainrun.sbatch` | the main-run job: account `mainrun`, 2 nodes × 8 GPUs, `--requeue`, sets the deterministic env (`OMP_NUM_THREADS=1`) and the NCCL flight recorder |
 | `team_job.sbatch` | a preemptible team job |

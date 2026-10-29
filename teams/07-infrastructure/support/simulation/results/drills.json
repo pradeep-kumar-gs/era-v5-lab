@@ -1,5 +1,5 @@
 {
- "duration_s": 1264,
+ "duration_s": 1778,
  "passed": 31,
  "total": 31,
  "drills": [
@@ -18,7 +18,7 @@
     "ladder-perf"
    ],
    "team_saved_before_exit": true,
-   "seconds_submit_to_running": 4.5
+   "seconds_submit_to_running": 2.4
   },
   {
    "drill": "gpu_allocation",
@@ -36,67 +36,67 @@
   {
    "drill": "kill_process_1",
    "pass": true,
-   "node": "c2",
-   "restored_step": 1942,
-   "lost_steps": 28
+   "node": "c1",
+   "restored_step": 2907,
+   "lost_steps": 93
   },
   {
    "drill": "kill_process_2",
    "pass": true,
-   "node": "c2",
-   "restored_step": 2072,
-   "lost_steps": 28
+   "node": "c1",
+   "restored_step": 3039,
+   "lost_steps": 11
   },
   {
    "drill": "kill_process_3",
    "pass": true,
-   "node": "c2",
-   "restored_step": 2202,
-   "lost_steps": 18
+   "node": "c1",
+   "restored_step": 3170,
+   "lost_steps": 0
   },
   {
    "drill": "sigusr1_save_and_requeue_1",
    "pass": true,
-   "saved_step": 2235,
-   "restored_step": 2235,
+   "saved_step": 3194,
+   "restored_step": 3194,
    "lost_steps": 0
   },
   {
    "drill": "sigusr1_save_and_requeue_2",
    "pass": true,
-   "saved_step": 2252,
-   "restored_step": 2252,
+   "saved_step": 3229,
+   "restored_step": 3229,
    "lost_steps": 0
   },
   {
    "drill": "sigusr1_save_and_requeue_3",
    "pass": true,
-   "saved_step": 2281,
-   "restored_step": 2281,
+   "saved_step": 3262,
+   "restored_step": 3262,
    "lost_steps": 0
   },
   {
    "drill": "kill_during_save",
    "pass": true,
-   "inflight_step": 2540,
-   "restored_step": 2411,
-   "previous_latest": 2411
+   "inflight_step": 3525,
+   "restored_step": 3393,
+   "previous_latest": 3393
   },
   {
    "drill": "kill_during_restore",
    "pass": true,
-   "restore_interrupted_at": 2541,
-   "restored_step": 2541,
+   "restore_interrupted_at": 3524,
+   "restored_step": 3524,
    "restore_failures": 0
   },
   {
    "drill": "spot_notice",
    "pass": true,
-   "node": "c3",
+   "node": "c2",
    "drained": true,
    "new_nodes": [
     "c1",
-    "c2"
+    "c3"
    ],
    "lost_steps": 0
   },
@@ -119,16 +119,16 @@
     "c3"
    ],
    "pending_reason": "BeginTime",
-   "waited_s": 54,
-   "restored_step": 3472
+   "waited_s": 55,
+   "restored_step": 4425
   },
   {
    "drill": "hang_watchdog",
    "pass": true,
    "node": "c3",
-   "watchdog_idle_s": 20.66,
-   "restored_step": 3472,
-   "lost_steps": 18
+   "watchdog_idle_s": 20.59,
+   "restored_step": 4425,
+   "lost_steps": 15
   },
   {
    "drill": "node_loss",
@@ -138,20 +138,20 @@
     "c1",
     "c2"
    ],
-   "lost_steps": 18
+   "lost_steps": 35
   },
   {
    "drill": "controller_failover",
    "pass": true,
-   "takeover_s": 81.9,
+   "takeover_s": 82.0,
    "job_via_backup": "8",
    "main_run_state_after": "RUNNING"
   },
   {
    "drill": "db_backup_restore",
    "pass": true,
-   "file": "slurm_acct_db-20261028T025248Z.sql.gz",
-   "bytes": 16617,
+   "file": "slurm_acct_db-20261029T025805Z.sql.gz",
+   "bytes": 16513,
    "tables": 31,
    "tables_restored": 31,
    "job_rows_restored": 44
@@ -159,20 +159,20 @@
   {
    "drill": "nan_guard_hold",
    "pass": true,
-   "nan_at_step": 5965,
-   "latest_committed": 5843,
+   "nan_at_step": 6815,
+   "latest_committed": 6804,
    "job_state": "SPECIAL_EXIT",
    "reason": "JobHeldUser"
   },
   {
    "drill": "held_job_explains_itself",
    "pass": true,
-   "comment": "V5 HELD (78): NaN: held at step 5965. Explain: python metrics/explain.py nonfinite. Do: roll back: sbatch --export=ALL,TRAIN_EXTRA='--from-step <last good step> --skip <N> --branch <new name>' slurm/mainrun.sbatch (last good step: python ckpt/ckpt.py "
+   "comment": "V5 HELD (78): NaN: held at step 6815. Explain: python metrics/explain.py nonfinite. Do: roll back: sbatch --export=ALL,TRAIN_EXTRA='--from-step <last good step> --skip <N> --branch <new name>' slurm/mainrun.sbatch (last good step: python ckpt/ckpt.py "
   },
   {
    "drill": "rollback_skip_branch",
    "pass": true,
-   "restored_step": 5843,
+   "restored_step": 6804,
    "branch": "b1"
   },
   {
@@ -184,13 +184,13 @@
   {
    "drill": "loss_spike_hold",
    "pass": true,
-   "spike_at_step": 5990,
-   "latest_committed": 5971
+   "spike_at_step": 6950,
+   "latest_committed": 6932
   },
   {
    "drill": "main_run_completes",
    "pass": true,
-   "final_step": 6031,
+   "final_step": 6992,
    "job": "10"
   },
   {
@@ -204,8 +204,8 @@
    "arch": [
     "arch",
     "",
-    "1434",
-    "0.484458"
+    "2381",
+    "0.429545"
    ],
    "posttrain": [
     "posttrain",
@@ -218,24 +218,24 @@
    "drill": "gpu_hours_accounting",
    "pass": true,
    "gpu_minutes_by_account": {
-    "arch": 12.5,
-    "perf": 18.7,
-    "eval": 33.4,
-    "mainrun": 33.5
+    "arch": 19.7,
+    "perf": 25.1,
+    "eval": 49.4,
+    "mainrun": 36.5
    }
   },
   {
    "drill": "retention",
    "pass": true,
-   "deleted": 39,
-   "protected": 11,
-   "freed_bytes": 46417966,
+   "deleted": 44,
+   "protected": 12,
+   "freed_bytes": 52364081,
    "store": "s3"
   },
   {
    "drill": "export_safetensors",
    "pass": true,
-   "step": 6031
+   "step": 6992
   },
   {
    "drill": "live_alerts",

@@ -36,11 +36,13 @@ Every rule below exists to stop one of these from costing money.
                          │
    ┌─────────────────────▼──────────────────────┐
    │ 1. safety checks: no NaN? enough disk?      │  if NaN → do NOT save, exit 78 (wait for a person)
-   │ 2. STALL: copy state to local NVMe          │  ← the only part training waits for
+   │    ALL ranks: fingerprint, probe loss       │  (under FSDP these are collectives: never rank 0 alone)
+   │ 2. STALL: copy state GPU → host RAM         │  ← the only part training waits for (dcp.async_save)
    └─────────────────────┬──────────────────────┘
                          │ training continues
-   ┌─────────────────────▼──────────────────────┐   background thread
-   │ 3. upload every file to S3 + SHA256         │
+   ┌─────────────────────▼──────────────────────┐   background threads
+   │ 3. write shards to local NVMe (DCP, gloo)   │
+   │    upload every file to S3 + SHA256         │
    │ 4. each rank writes sums_rank<r>.json       │
    │ 5. rank 0 re-checks every object in S3      │
    │ 6. rank 0 writes MANIFEST.json  (LAST file) │
@@ -104,7 +106,7 @@ The four proofs. **Any one failing stops us**, prints both values, and the next 
 
 | Proof | Rule | Catches |
 |---|---|---|
-| **State digest** | sha256 over the raw bytes of every tensor, in sorted key order, must equal the saved one | a damaged or partial load |
+| **State digest** | a fingerprint of every **logical** tensor (each rank adds its shard, weighted by position in the full tensor; one all-reduce), must equal the saved one, at the same or another world size | a damaged, partial or wrongly resharded load |
 | **Probe loss** | loss on one fixed held-out batch must be **bit-equal** (raw float bits, not rounded) to the saved value for this device class (`cpu`, `cuda:<model>`) | V4's silent misload |
 | **Next batch** | hash of the next batch must equal the saved one | data loader resumed at the wrong place |
 | **Frozen hashes** | each frozen tensor must match the manifest | a frozen table changed |
@@ -188,7 +190,7 @@ old branch stays, so the run can be replayed exactly later. You can also restart
 |---|---|
 | `ckpt.py` | the `Checkpointer` (save, background upload and commit, restore with all checks), `run_retention`, `export_safetensors`, and a small CLI |
 | `store.py` | one interface, two stores: `LocalStore` (a folder) and `S3Store` (boto3: multipart above 64 MB, retries, SHA256 checksums). `open_store("s3://…")` picks S3 |
-| `loader_contract.py` | the test Teams 01/02's real data loader must pass: `state_dict`, `load_state_dict`, `next_batch_id`, `add_skip` |
+| `loader_contract.py` | the test Teams 01/02's real data loader must pass: `state_dict` (**one global ledger offset, the same on every rank**), `load_state_dict`, `next_batch_id`, `add_skip`, and a resume at another world size |
 In `support/` (optional): `tests/test_ckpt.py` (tests T1–T13, below), `tools/bench_save.py` (measures the real
 stall on a GPU: GPU-to-host copy speed, sync and async save), and `simulation/trainer/train.py`, a tiny trainer
 that follows every rule here (signals, watchdog, guards).

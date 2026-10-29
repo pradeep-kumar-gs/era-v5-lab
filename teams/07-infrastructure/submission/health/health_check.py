@@ -6,9 +6,13 @@ node is taken out of service before it can waste paid GPU hours by crashing or s
 A tool that is missing gives "skipped" with the reason: it is never counted as a pass.
 
 Modes:
-  --mode prolog    quick checks, for the Slurm prolog (budget 30 s)
-  --mode periodic  quick checks, for Slurm's HealthCheckProgram
+  --mode prolog    quick checks + DCGM diag level 1, for the Slurm prolog (budget 30 s; GPUs are idle here)
+  --mode periodic  quick checks + DCGM health watches, for Slurm's HealthCheckProgram (GPUs may be busy)
   --mode full      adds DCGM diag level 2 and the all-reduce sweep (before dry runs, after a repair)
+
+Why periodic mode never runs `dcgmi diag`: diag puts its own load on the GPUs, and NVIDIA advises not to run
+it while a job uses them. On a busy GPU it can report a false "fail", which would drain the node and requeue
+the main run, again and again. `dcgmi health -c` only reads the counters DCGM already watches: cheap and safe.
   --report-only    print the report, take no action
 
 Exit codes (never 1 or 75, which belong to training jobs):
@@ -140,6 +144,19 @@ def dcgm_check(level) -> list:
     return [check("dcgm_diag", "fail" if '"Fail"' in p.stdout else "pass", f"level {level}", required=True)]
 
 
+def dcgm_health_check() -> list:
+    """Read DCGM's background health watches (PCIe, memory, NVLink, thermal, power). No load on the GPUs."""
+    if not shutil.which("dcgmi"):
+        return [check("dcgm_health", "skipped", "dcgmi not found")]
+    run(["dcgmi", "health", "-s", "a"], timeout=30)  # turn the watches on (no-op if they already are)
+    p = run(["dcgmi", "health", "-c", "-j"], timeout=30)
+    if p.returncode != 0:
+        return [check("dcgm_health", "warn", f"dcgmi health -c exit {p.returncode}")]  # tool trouble: never drain
+    if '"Failure"' in p.stdout:
+        return [check("dcgm_health", "fail", "DCGM health watch reports Failure", required=True)]
+    return [check("dcgm_health", "warn" if '"Warning"' in p.stdout else "pass", "health watches", required=True)]
+
+
 def xid_check(th, log=None) -> list:
     lines, source = xid_scan.read_kernel_log(log)
     if not source:
@@ -240,8 +257,10 @@ def main(argv=None):
     if a.mode == "full":
         checks += timed(dcgm_check, 2)
         checks += timed(allreduce_check, th, expect)
+    elif a.mode == "prolog" and expect:
+        checks += timed(dcgm_check, 1)      # GPUs are idle before the job starts
     elif expect:
-        checks += timed(dcgm_check, 1)
+        checks += timed(dcgm_health_check)  # periodic: the GPUs may be training
 
     v = verdict(checks)
     failed = [c for c in checks if c["status"] == "fail"]

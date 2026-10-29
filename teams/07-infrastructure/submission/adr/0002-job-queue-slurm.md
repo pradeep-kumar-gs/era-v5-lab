@@ -72,7 +72,10 @@ EC2; only the node lines differ (`support/simulation/slurm-docker/nodes.conf` vs
 - **Main run on on-demand or an EC2 Capacity Block**, never spot (ADR 0004 §3), plus **one hot spare**.
 - **The hot spare is not idle:** it runs preemptible team jobs, which the main run preempts when it needs the node.
 - **Idle nodes are stopped:** `State=CLOUD` nodes with `SuspendProgram` / `ResumeProgram` and `SuspendTime=600`;
-  `SuspendExcNodes=gpu-[1-9]:1` keeps exactly one idle node up as the spare. This replaces V4's idle alarm.
+  the spare is kept up by **name**: `job_queue.py keep-spare` (systemd timer on the controller, every minute,
+  `slurm/v5-keep-spare.*`) sets `SuspendExcNodes=<spare node>` and powers a node up if none is free. The count
+  form `gpu-[1-9]:1` was dropped: the man page says it keeps N "powered up" nodes and does not say whether busy
+  main-run nodes count, and if they do, no spare is kept (review finding, week 1). This replaces V4's idle alarm.
 
 - **GPUs are a Slurm resource (gres).** `GresTypes=gpu`; on EC2 `gres.conf` uses `AutoDetect=nvml` and
   `cgroup.conf` sets `ConstrainDevices=yes`, so a job sees only its own GPUs (`CUDA_VISIBLE_DEVICES`). Job
@@ -110,10 +113,17 @@ EC2; only the node lines differ (`support/simulation/slurm-docker/nodes.conf` vs
 | Training shards | S3 → **local NVMe**, prefetched ahead of use | the next shard downloads while the current one trains (S6). No training read goes to S3 |
 | Checkpoints | local NVMe → S3 | ADR 0001 |
 | Code, configs, small shared files | the image (or EFS) | never on the training read path |
-| Events, health JSON, incident records | local file → shipped by Team 08's agent | in Docker: the shared `s3` volume |
+| Job logs, events, exit notes | node-local `/var/log/v5/{logs,events,runs}` → shipped by Team 08's agent to S3 | in Docker `/var/log/v5` is a link to the shared volume, which plays the shipped copy |
+| Crash-loop count | one object `crashes.json` in the run's S3 folder, read and rewritten whole | not a file on a node |
 
-**No shared parallel file system for the main run**: one less component that can be the slow-storage failure,
-and one less monthly bill. FSx for Lustre is revisited only if prefetch cannot keep data wait below target (Q-M9).
+**No shared file system at all on EC2** (no EFS/FSx/Mountpoint for job data): one less component that can be
+the slow-storage failure, and one less monthly bill. Nothing a job needs on its next node may live on a node:
+state that must survive a move goes to S3 through `ckpt/store.py` (checkpoints, `latest.json`, `commits.jsonl`,
+`crashes.json`), everything else is a node-local file the log agent ships. Week 1 review found the first draft
+broke this rule: the crash counter was an appended file under `/s3/runs`, which on a node-local disk restarts from
+zero on every new node (so the cap never fires), and on Mountpoint-S3 fails because S3 cannot append. The job log
+used `--open-mode=append` on `/s3/logs` for the same reason. Both moved. The only EFS is slurmctld's
+`StateSaveLocation` (§1), which Slurm needs for controller failover and no job touches. FSx for Lustre is revisited only if prefetch cannot keep data wait below target (Q-M9).
 S3 is reached through a **gateway VPC endpoint** (no NAT data charges, no internet path).
 
 ### 4. Accounts, QOS and budgets (`slurmdbd`, `slurm/setup_accounts.sh`)
@@ -148,7 +158,10 @@ root
   always resumes from `latest.json`. Rollback passes `TRAIN_EXTRA="--from-step K --skip N --branch B"`.
 - `slurm.conf`: `JobRequeue=1`, **`RequeueExit=75`**, **`RequeueExitHold=78`**, `MaxBatchRequeue=1000`.
 - `queue/job_queue.py` (the wrapper) maps every trainer outcome to 0, 75 or 78 (ADR 0001 §6), applies the
-  **crash-loop cap** (3 crashes in 30 min → 78), and emits `job.started / ended / requeued / held`.
+  **crash-loop cap** (3 crashes in 30 min → 78), and emits `job.started / ended / requeued / held`. The crash
+  times live in `crashes.json` next to the checkpoints in S3, so the count survives a move to any node. If S3
+  cannot be reached the crash is retried as usual and `job.crash_ledger_unavailable` says the cap is not counting.
+  (`SLURM_RESTART_COUNT` alone cannot do this: preemptions and spot moves also raise it, and they are not crashes.)
 - **Plain-words status** (added for monitoring): the trainer leaves an exit note with its cause; the wrapper
   writes "what happened / already done / what you do" (from `common/reasons.py`) into the Slurm job comment,
   the job log and the job events. A held job therefore says why and what to do in `squeue` itself, instead of
@@ -160,8 +173,10 @@ root
     has none, so it was dropped.
 - A node that stops answering for `SlurmdTimeout=30` s is marked DOWN and its job is requeued by Slurm.
 - **Requeue delay.** Slurm holds every requeued job until the old job's launch credential has expired
-  (`cred_expire` + 1 s, default ≈ 121 s). We set `AuthInfo=cred_expire=30`: measured ≈ 52 s from exit to running,
-  every requeue succeeded. A first attempt forced an immediate restart with a controller epilog (≈ 4 s); run 7 of
+  (`cred_expire` + 1 s, default ≈ 121 s). We set **`AuthInfo=cred_expire=60`**. The man page says the credential
+  must also live "long enough to … run prolog", and our prolog budget is 30 s, so 60 s is twice the budget. Week 1
+  used 30 s (≈ 52 s exit to running); the review pointed out that left no margin for a slow prolog. 60 s costs
+  about 30 s more per restart: run 11 measured reschedule 90 s and MTTR 85 s (run 10: 57 s and 55 s). A first attempt forced an immediate restart with a controller epilog (≈ 4 s); run 7 of
   the simulation showed it sometimes starts the job while the old credential is still valid, and Slurm then kills
   it as "Job credential revoked" and marks it **FAILED**, losing the main run. That hack was removed.
 
@@ -263,8 +278,9 @@ Each dry run, and the Docker simulation, runs these drills, timed and recorded a
   --signal=USR1` the main run (emergency save, exit 75) → roll the nodes → requeue with
   `TRAIN_EXTRA=--allow-env-change`, which is logged in the restore event. Slurm itself: `slurmdbd` first, then
   `slurmctld`, then `slurmd`, as Slurm's upgrade guide requires.
-- **Logs:** job stdout/stderr and events go to node-local files, shipped by Team 08's agent to S3
-  (`s3://…/logs/`, 90 days Standard, then Glacier). In Docker they are on the shared `/s3` volume.
+- **Logs:** job stdout/stderr (`/var/log/v5/logs`) and events (`/var/log/v5/events`) are node-local files,
+  shipped by Team 08's agent to S3 (`s3://…/logs/`, 90 days Standard, then Glacier). A requeue on another node
+  starts a new file there; the agent's S3 copy holds them all. In Docker `/var/log/v5` links to the shared volume.
 - **Paging path:** `metrics/watch.py` runs on the head node, recomputes the catalog every 30 s, and on a new
   severity writes `alert.fired` and posts to `V5_ALERT_WEBHOOK` (Team 08's pager or a chat webhook). HIGH pages
   the on-call person. Tested in the simulation (alerts fired live for the drills).
@@ -292,7 +308,7 @@ All queue metrics with LOW / MEDIUM / HIGH thresholds are Q-01 … Q-21 in `metr
 | Q-19 | Goodput | ≤ 80% |
 | Q-20 | MTTR | ≥ 60 min |
 
-Targets: goodput ≥ 90%, MTTR ≤ 15 min, reschedule ≤ 2 min with the spare (measured ≈ 50 s), node replacement ≤ 5 min,
+Targets: goodput ≥ 90%, MTTR ≤ 15 min, reschedule ≤ 2 min with the spare (measured ≈ 90 s, run 11), node replacement ≤ 5 min,
 human interventions ≈ 0 (Llama 3: 3 of 466).
 
 ## Consequences
@@ -334,7 +350,8 @@ tiny model, checkpoints on the S3 emulator):
 | node loss | 88 s (`SlurmdTimeout` 30 s) | 24 |
 | controller failover | backup in control after 82 s; training never stopped | 0 |
 
-Most of each MTTR is Slurm's requeue wait (`cred_expire=30`, §5). Run 3 measured 3–57 s with an
+Most of each MTTR is Slurm's requeue wait (`cred_expire=60`, §5; run 11: MTTR 85 s, 31 of 31 drills).
+The table above is run 9 (`cred_expire=30`); with 60 s each restart is about 30 s longer. Run 3 measured 3–57 s with an
 immediate-restart hack, but run 7 showed that hack can lose the main run, so it was removed. Goodput in the
 simulation is low only because a fault is injected about every minute; ADR 0004 projects the measured
 durations onto real failure rates.

@@ -139,7 +139,7 @@ HIGH alerts, all areas:
 
 | Finding | Cost effect | Change |
 |---|---|---|
-| Slurm delays every requeued job by ≈ 121 s (`PENDING (BeginTime)`) | ≈ 2 min of the whole cluster idle per restart (≈ $7.70 on 2 nodes; ≈ $30 on 8) | `AuthInfo=cred_expire=30`: ≈ 50 s, safe. A faster hack (force start, ≈ 4 s) lost the main run in run 7 ("credential revoked" → FAILED) and was removed: a cheaper restart is not worth a lost run (ADR 0002 §5) |
+| Slurm delays every requeued job by ≈ 121 s (`PENDING (BeginTime)`) | ≈ 2 min of the whole cluster idle per restart (≈ $7.70 on 2 nodes; ≈ $30 on 8) | `AuthInfo=cred_expire=60`: ≈ 90 s, safe, and it covers a 30 s prolog twice over (`cred_expire=30` gave ≈ 50 s but no prolog margin, week-1 review). A faster hack (force start, ≈ 4 s) lost the main run in run 7 ("credential revoked" → FAILED) and was removed: a cheaper restart is not worth a lost run (ADR 0002 §5) |
 | `OMP_NUM_THREADS` changes the loss bits on CPU | a "bit-equal" resume check would fail for the wrong reason and block a restart | job scripts set it; the manifest records it (ADR 0001 §1) |
 | A drill's `pkill -f 'train.py …'` matched its own shell and froze the test | none in production, but the same trap applies to any ops script | ops scripts use the `[t]rain.py` pattern |
 | torchrun turns SIGTERM into exit 1 for the workers' parent | a preempted job would be counted as a crash | trainers run under `srun`, which forwards signals; the wrapper maps exits (ADR 0002 §5) |

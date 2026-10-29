@@ -22,6 +22,9 @@ mkdir -p /run/munge && chown munge:munge /run/munge
 runuser -u munge -- /usr/sbin/munged --force
 
 # Per-node settings read by the prolog, health check and job scripts (on EC2: written by the AMI build).
+# On EC2 /var/log/v5 is each node's own disk, shipped to S3 by the log agent (ADR 0002 §7). Here it points at the
+# shared volume, which plays the part of that shipped copy, so the drills can read every node's events.
+ln -sfn /s3 /var/log/v5
 mkdir -p /etc/v5
 printf '%s\n' "export V5_EVENTS_DIR=/s3/events" "export V5_EXPECT_GPUS=0" \
   "export V5_NVME_MIN_FREE_GB=1" "export V5_MEM_MIN_GB=0.2" "export V5_DEVICE=cpu" \

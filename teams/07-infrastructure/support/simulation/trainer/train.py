@@ -121,6 +121,8 @@ def main(argv=None) -> int:
     ap.add_argument("--spike-at", type=int, default=int(os.environ.get("SPIKE_AT", "-1")),
                     help="test only: multiply the loss by 10 for 5 steps from this step")
     ap.add_argument("--device", default=os.environ.get("V5_DEVICE", "cpu"), choices=["cpu", "cuda"])
+    ap.add_argument("--fsdp", action="store_true", default=os.environ.get("V5_FSDP") == "1",
+                    help="shard weights and optimizer with FSDP2 (fully_shard) instead of DDP, like the real run")
     ap.add_argument("--crash-at", type=int, default=int(os.environ.get("CRASH_AT", "-1")),
                     help="test only: raise an unhandled error at this step (exit 1)")
     a = ap.parse_args(argv)
@@ -150,7 +152,17 @@ def main(argv=None) -> int:
 
     model = TinyLM(seed).to(dev)
     ddp = model
-    if ws > 1:
+    if a.fsdp and ws > 1:
+        # Every rank holds only its slice of each weight (DTensor). Checkpoint fingerprints, the probe forward
+        # and DCP must then run on every rank together: this mode proves they do (test T16).
+        try:
+            from torch.distributed.fsdp import fully_shard
+        except ImportError:  # torch < 2.6
+            from torch.distributed._composable.fsdp import fully_shard
+        for m in (model.ff1, model.ff2, model.head, model.head_mtp):
+            fully_shard(m)
+        ddp = fully_shard(model)
+    elif ws > 1:
         ddp = torch.nn.parallel.DistributedDataParallel(model, device_ids=[dev.index] if dev.type == "cuda" else None)
     optim = torch.optim.AdamW(model.parameters(), lr=a.lr)
     loader = SyntheticLoader(seed, a.global_batch, rank, ws)

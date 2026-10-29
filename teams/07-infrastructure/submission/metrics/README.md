@@ -36,7 +36,7 @@ python metrics/explain.py 78          # or 137, loss_spike, CK-05, v5:xid, JobHe
 ```text
  trainer ─┐                                       ┌─► Slurm job Comment + job log banner   (people)
  ckpt  ───┤  one JSON line per event              │
- health ──┼──► /s3/events/<host>-<pid>.jsonl ─────┼─► metrics/watch.py  (every 30 s) ──► alert.fired event
+ health ──┼──► /var/log/v5/events/<host>-<pid>.jsonl ─────┼─► metrics/watch.py  (every 30 s) ──► alert.fired event
  wrapper ─┤   (common/events.py)                  │                                  └─► webhook: Team 08 pager / chat
  spot   ──┘                                       └─► metrics/evaluate.py (after a run) ─► report.md, metrics.json, alerts.json
                                                        Slurm itself: squeue, sinfo -R, sacct, sshare
@@ -44,11 +44,11 @@ python metrics/explain.py 78          # or 137, loss_spike, CK-05, v5:xid, JobHe
 
 | Source | What it gives | How to consume it |
 |---|---|---|
-| **Events** (`/s3/events/*.jsonl`) | every fact, with UTC time, host, run, job | ship the files (Team 08's agent → S3 / log store); one JSON per line, no free-text parsing |
+| **Events** (`/var/log/v5/events/*.jsonl`, node-local) | every fact, with UTC time, host, run, job | ship the files (Team 08's agent → S3 / log store); one JSON per line, no free-text parsing |
 | **Live alerts** (`metrics/watch.py`) | `alert.fired` events + a webhook post when a metric reaches a new severity | set `V5_ALERT_WEBHOOK`; page on `severity: high` |
 | **Report** (`metrics/evaluate.py`) | goodput, incidents (MTTR per fault), dollars wasted, every metric with its level | after each dry run / daily; `metrics.json` for dashboards |
 | **Slurm job Comment** | plain-words status of each job (`V5 HELD (78): loss spike at step 5880 …`) | `squeue -o "%.10i %.12T %.20r %k"` or `scontrol show job <id>` |
-| **Job log banner** | the same, longer: what happened / already done / what you do / detail | end of `/s3/logs/<job>-<id>.out` |
+| **Job log banner** | the same, longer: what happened / already done / what you do / detail | end of `/var/log/v5/logs/<job>-<id>.out` |
 | **Health report** | one JSON per check run, `verdict` + `drain_reason` | the `health.report` event; `/var/log/slurm/health-last.json` on the node |
 
 ### Event format
@@ -304,7 +304,9 @@ Training still runs, but the last commit is getting old (CK-01 will follow). `ch
 
 In `support/`: `tests/test_monitoring.py` fails if the code can report something that has no explanation.
 
-From `submission/`:
+From `submission/`. Events are written on each node's own disk (`/var/log/v5/events`) and the log agent ships
+them to `s3://<bucket>/events/`; `watch.py` reads a folder, so on EC2 point it at a synced copy
+(`aws s3 sync s3://<bucket>/events /var/lib/v5-watch/events`). In Docker the folder is the shared `/s3/events`.
 
 ```bash
 python metrics/watch.py --events /s3/events --run v5main --nodes 2 --interval-s 1800 --every 30
