@@ -772,6 +772,9 @@ def export_safetensors(remote_run: str, model_factory, probe_fn, out_path: str, 
         sha, _ = ck.store.get_file(f"{c['path']}/{n}", os.path.join(local_dir, n))
         if sha != s["sha256"]:
             raise IntegrityError(f"export: {n} is damaged")
+    if man.get("backend") == "deepspeed":
+        from ckpt.ds_ckpt import export_ds
+        return export_ds(ck, c, man, local_dir, model_factory, probe_fn, out_path)
     model = model_factory()
     target = {"model": model.state_dict()}
     want = {k: v for k, v in man["keys"].items() if k.startswith("model.")}

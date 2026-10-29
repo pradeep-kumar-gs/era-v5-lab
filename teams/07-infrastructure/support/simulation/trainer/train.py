@@ -126,7 +126,9 @@ def main(argv=None) -> int:
                     help="shard weights and optimizer with FSDP2 (fully_shard) instead of DDP, like the real run")
     ap.add_argument("--deepspeed", action="store_true", default=os.environ.get("V5_DEEPSPEED") == "1",
                     help="train and checkpoint with a DeepSpeed ZeRO engine (support/docs/deepspeed_impact.md)")
-    ap.add_argument("--zero-stage", type=int, default=int(os.environ.get("V5_ZERO_STAGE", "1")), choices=[0, 1, 2])
+    ap.add_argument("--zero-stage", type=int, default=int(os.environ.get("V5_ZERO_STAGE", "1")), choices=[0, 1, 2, 3])
+    ap.add_argument("--ds-precision", default=os.environ.get("V5_DS_PRECISION", "fp32"), choices=["fp32", "fp16", "bf16"],
+                    help="DeepSpeed weights dtype: fp32 (CPU tests), fp16 (T4: no bf16), bf16 (B200, the real run)")
     ap.add_argument("--crash-at", type=int, default=int(os.environ.get("CRASH_AT", "-1")),
                     help="test only: raise an unhandled error at this step (exit 1)")
     a = ap.parse_args(argv)
@@ -158,9 +160,15 @@ def main(argv=None) -> int:
     ddp = model
     optim = None
     if a.deepspeed:
-        # DeepSpeed owns the optimizer and the gradient sync. fp32 keeps the CPU test bit-exact; the real
-        # run uses bf16. srun or torchrun has already started the process group (DS-3: no deepspeed launcher).
+        # DeepSpeed owns the optimizer and the gradient sync. fp32 on CPU; fp16 on T4 (dynamic loss scale, its
+        # state is in the checkpoint); bf16 on B200, the real run. srun or torchrun has already started the process group (DS-3: no deepspeed launcher).
+        import platform
+
         import deepspeed
+        if dev.type == "cpu" and platform.machine() not in ("x86_64", "AMD64"):
+            # DeepSpeed's CPU mode compiles a shared-memory all-reduce at start; its kernels are x86 only (AVX),
+            # so on ARM (Apple-silicon Docker) the compile fails. Plain gloo does the same job. GPU runs never use it.
+            deepspeed.ops.__compatible_ops__["deepspeed_shm_comm"] = False
         if not dist.is_initialized():      # one process alone: start a group of 1, or DeepSpeed looks for MPI
             for k, v in (("RANK", "0"), ("WORLD_SIZE", "1"), ("LOCAL_RANK", "0"), ("MASTER_ADDR", "127.0.0.1"),
                          ("MASTER_PORT", "29500")):
@@ -170,10 +178,19 @@ def main(argv=None) -> int:
             "train_batch_size": a.global_batch, "train_micro_batch_size_per_gpu": a.global_batch // ws,
             "gradient_accumulation_steps": 1, "gradient_clipping": clip,
             "optimizer": {"type": "AdamW", "params": {"lr": a.lr, "torch_adam": True}},
-            "zero_optimization": {"stage": a.zero_stage, "reduce_scatter": False},
+            # Bucket sizes are memory: DeepSpeed's default buckets hold 5e8 values (2 GB fp32) whatever the model
+            # size, and 4 such trainers OOM the Docker VM. Size them to the model (impact doc §1.12); on the real
+            # run they are a tuned, pinned part of ds_config (DS-7).
+            "zero_optimization": {"stage": a.zero_stage, "reduce_scatter": False, "reduce_bucket_size": 2 ** 20,
+                                  "allgather_bucket_size": 2 ** 20, "stage3_prefetch_bucket_size": 2 ** 20,
+                                  "stage3_param_persistence_threshold": 0, "stage3_max_live_parameters": 2 ** 22},
             "checkpoint": {"tag_validation": "Fail", "use_node_local_storage": True},
             "steps_per_print": 10 ** 9, "wall_clock_breakdown": False,
         }
+        if a.ds_precision == "fp16":
+            ds_cfg["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 12}
+        elif a.ds_precision == "bf16":
+            ds_cfg["bf16"] = {"enabled": True}
         ddp, optim, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_cfg)
     elif a.fsdp and ws > 1:
         # Every rank holds only its slice of each weight (DTensor). Checkpoint fingerprints, the probe forward

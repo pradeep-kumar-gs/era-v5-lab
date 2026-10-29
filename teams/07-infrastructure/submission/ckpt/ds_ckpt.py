@@ -10,6 +10,8 @@ In simple words:
 - `load_checkpoint` returns (None, None), or fails an assert, when it cannot load. That must never become
   a fresh start (it would train from step 0 over good checkpoints): here it is an IntegrityError, so
   restore falls back to the previous commit.
+- ZeRO-3 holds only a piece of each weight per rank: the digest adds each piece at its place in the full
+  weight, so weights are never gathered just to check them.
 - ZeRO optimizer pieces depend on the world size. A resume at another world size is refused
   (ReshardError, exit 78): an operator converts the checkpoint with ds_to_universal.py first.
 """
@@ -27,8 +29,8 @@ import torch.distributed as dist
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from ckpt.ckpt import (MANIFEST, SCHEMA, Checkpointer, IntegrityError, NonFiniteError, ReshardError,  # noqa: E402
                        RestoreCheckError, StrictLoadError, EnvMismatchError, ENV_MUST_MATCH, _fingerprint_piece,
-                       all_finite, all_true, barrier, broadcast_obj, device_class, env_manifest, fingerprints,
-                       float_bits, key_spec, local_rank, rank, rng_capture, rng_restore, tensor_items, world)
+                       all_finite, all_true, barrier, broadcast_obj, device_class, env_manifest,
+                       fingerprints, float_bits, local_rank, rank, rng_capture, rng_restore, tensor_items, world)
 from common.events import Timer, emit  # noqa: E402
 
 DS_SCHEMA = SCHEMA + "+deepspeed/1"
@@ -47,12 +49,54 @@ def ds_env(engine) -> dict:
             "zero_stage": engine.zero_optimization_stage()}
 
 
+def model_pieces(engine) -> list:
+    """[(key, local piece, offset, full shape, dtype, add)] for every weight and buffer of the model.
+
+    ZeRO 0-2: every rank holds the full weight; rank 0 adds it once. ZeRO-3: a weight is flattened, padded and
+    cut into equal pieces; rank r holds flat elements [r*n, r*n + n) in `param.ds_tensor` (DeepSpeed's
+    partition_parameters.py). Each rank adds its own piece at its place in the FULL weight, so the
+    fingerprint equals that of the full weight, at any world size and any stage, without gathering it."""
+    params = {n: p for n, p in engine.module.named_parameters()}
+    out = []
+    for k, t in engine.module.state_dict().items():
+        p = params.get(k)
+        if p is not None and hasattr(p, "ds_tensor"):
+            n = p.ds_tensor.ds_numel
+            start = n * rank()
+            keep = max(0, min(n, p.ds_numel - start))           # the last piece carries padding: drop it
+            piece = p.ds_tensor.detach().reshape(-1)[:keep]
+            out.append((f"model.{k}", piece, (start,), (p.ds_numel,), tuple(p.ds_shape), p.dtype, keep > 0))
+        else:
+            out.append((f"model.{k}", t, (0,) * t.dim(), tuple(t.shape), tuple(t.shape), t.dtype, rank() == 0))
+    return out
+
+
+def model_fingerprints(pieces, keys=None) -> dict:
+    items = [x for x in pieces if keys is None or x[0] in keys]
+    if not items:
+        return {}
+    dev = items[0][1].device
+    acc = torch.zeros(len(items), 2, dtype=torch.int64, device=dev)
+    for i, (_, loc, off, flat, _, _, add) in enumerate(items):
+        if add and loc.numel():
+            acc[i] = _fingerprint_piece(loc, off, flat).to(dev)
+    if dist.is_initialized():
+        dist.all_reduce(acc, op=dist.ReduceOp.SUM)
+    acc = (acc % (2 ** 31 - 1)).tolist()
+    return {x[0]: f"{a:08x}-{b:08x}" for x, (a, b) in zip(items, acc)}
+
+
+def model_spec(pieces) -> dict:
+    """Key -> [full shape, dtype], as key_spec gives for a full state dict (ZeRO-3 holds only pieces)."""
+    return {k[len("model."):]: [list(shape), str(dt)] for k, _, _, _, shape, dt, _ in pieces}
+
+
 def ds_digest(engine) -> tuple:
-    """(digest, model state). Weights are a full copy on every rank under ZeRO 0-2, so the usual logical
-    fingerprint works. The ZeRO optimizer state is this rank's own piece: each rank fingerprints its
-    piece and the digest lists them in rank order (a digest of this world size, by design: DS-5)."""
-    msd = {"model": engine.module.state_dict()}
-    model_fp = fingerprints(msd)
+    """(digest, model pieces, optimizer state, weights-only digest). The weights part is a logical fingerprint (same at any stage
+    and world size). The ZeRO optimizer state is this rank's own flat piece: each rank fingerprints its piece
+    and the digest lists them in rank order (a digest of this world size, by design: DS-5)."""
+    pieces = model_pieces(engine)
+    model_fp = model_fingerprints(pieces)
     osd = engine.optimizer.state_dict() if engine.optimizer is not None else {}
     mine = hashlib.sha256()
     for k, t in tensor_items(osd):
@@ -64,11 +108,12 @@ def ds_digest(engine) -> tuple:
     else:
         parts = [mine.hexdigest()]
     h = hashlib.sha256()
-    for k, t in tensor_items(msd):
-        h.update(f"{k}|{t.dtype}|{tuple(t.shape)}|{model_fp[k]};".encode())
+    for k, _, _, _, shape, dt, _ in pieces:
+        h.update(f"{k}|{dt}|{shape}|{model_fp[k]};".encode())
+    weights = h.hexdigest()             # weights only: equal at any ZeRO stage and world size
     for r, p in enumerate(parts):
         h.update(f"optim_rank{r}|{p};".encode())
-    return h.hexdigest(), msd, osd
+    return h.hexdigest(), pieces, osd, weights
 
 
 class DSCheckpointer(Checkpointer):
@@ -86,8 +131,9 @@ class DSCheckpointer(Checkpointer):
             if rank() == 0:
                 emit("checkpoint.backpressure", step=step, waited_s=waited)
 
-        digest, msd, osd = ds_digest(model)
-        if not all_true(all_finite(msd) and all_finite(osd)):
+        digest, pieces, osd, weights = ds_digest(model)
+        finite = all(torch.isfinite(x[1]).all().item() for x in pieces if x[1].is_floating_point())
+        if not all_true(finite and all_finite(osd)):
             if rank() == 0:
                 emit("checkpoint.failed", step=step, cause="nonfinite", stall_s=t.s())
             raise NonFiniteError(f"NaN/Inf in the state at step {step}; not saved")
@@ -103,7 +149,7 @@ class DSCheckpointer(Checkpointer):
                 emit("checkpoint.failed", step=step, cause="nvme_full", free_bytes=free, need_bytes=need)
             return False
 
-        frozen = fingerprints(msd, {f"model.{k}" for k in self.frozen_keys})
+        frozen = model_fingerprints(pieces, {f"model.{k}" for k in self.frozen_keys})
         probe = float_bits(probe_fn(model))
         ld = loader.state_dict()
         loader_global = all_true(json.dumps(ld, sort_keys=True) == broadcast_obj(json.dumps(ld, sort_keys=True)))
@@ -124,7 +170,7 @@ class DSCheckpointer(Checkpointer):
             meta = {
                 "schema": DS_SCHEMA, "backend": "deepspeed", "run_id": self.run_id, "branch": self.branch,
                 "step": step, "tokens": tokens, "world_size": world(), "reason": reason, "env": env,
-                "keys": key_spec(msd), "state_digest": digest,
+                "keys": model_spec(pieces), "state_digest": digest, "weights_digest": weights,
                 "frozen": {k[len("model."):]: v for k, v in frozen.items()},
                 "probe_loss": {device_class(model.module): probe},
                 "next_batch": loader.next_batch_id(), "loader_global": loader_global,
@@ -170,17 +216,18 @@ class DSCheckpointer(Checkpointer):
             raise IntegrityError(f"step {c['step']}: checksum mismatch in {bad}")
         verify_s = tv.s()
 
-        # 2. Environment, now including the DeepSpeed version and config.
+        # 2. ZeRO pieces are per rank: another world size needs the operator's universal conversion. Checked before
+        #    the environment: ds_config holds per-GPU batch sizes, so it differs too, and that message would hide this one.
+        if man["world_size"] != world():
+            raise ReshardError(f"step {c['step']} was saved by DeepSpeed at world size {man['world_size']}; "
+                               f"resume at {world()} needs ds_to_universal.py first (an operator job)")
+
+        # 3. Environment, now including the DeepSpeed version and config.
         now = dict(env_manifest(self.config_path), **ds_env(model))
         keys = tuple(ENV_MUST_MATCH) + ("deepspeed", "ds_config_sha256", "zero_stage")
         diff = {k: [man["env"].get(k), now.get(k)] for k in keys if man["env"].get(k) != now.get(k)}
         if diff and not allow_env_change:
             raise EnvMismatchError(f"environment differs from the checkpoint: {diff}")
-
-        # 3. ZeRO pieces are per rank: another world size needs the operator's universal conversion.
-        if man["world_size"] != world():
-            raise ReshardError(f"step {c['step']} was saved by DeepSpeed at world size {man['world_size']}; "
-                               f"resume at {world()} needs ds_to_universal.py first (an operator job)")
 
         # 4. Download, checking each copy.
         td = Timer()
@@ -197,7 +244,7 @@ class DSCheckpointer(Checkpointer):
         download_s = td.s()
 
         # 5. Strict key check on the weights.
-        want, have = man["keys"], key_spec({"model": model.module.state_dict()})
+        want, have = man["keys"], model_spec(model_pieces(model))
         missing = sorted(set(want) - set(have))
         unexpected = sorted(set(have) - set(want))
         changed = sorted(k for k in set(want) & set(have) if want[k] != have[k])
@@ -225,7 +272,7 @@ class DSCheckpointer(Checkpointer):
         # 7. The four proofs: digest, probe loss bits, next batch, frozen tables.
         tc = Timer()
         problems = []
-        digest, msd, _ = ds_digest(model)
+        digest, pieces, _, _ = ds_digest(model)
         if digest != man["state_digest"]:
             problems.append(f"state digest saved={man['state_digest']} restored={digest}")
         dc = device_class(model.module)
@@ -236,7 +283,7 @@ class DSCheckpointer(Checkpointer):
         nb = loader.next_batch_id()
         if nb != man["next_batch"]:
             problems.append(f"next batch saved={man['next_batch']} restored={nb}")
-        frozen_now = fingerprints(msd, {f"model.{k}" for k in man["frozen"]})
+        frozen_now = model_fingerprints(pieces, {f"model.{k}" for k in man["frozen"]})
         for k, h in man["frozen"].items():
             if frozen_now.get(f"model.{k}") != h:
                 problems.append(f"frozen tensor {k} fingerprint differs")
@@ -252,3 +299,45 @@ class DSCheckpointer(Checkpointer):
                 "probe_recorded": probe_saved is not None, "store": st.kind, "backend": "deepspeed",
                 "verify_s": verify_s, "download_s": download_s, "load_s": load_s, "checks_s": checks_s,
                 "restore_s": t.s()}
+
+
+def export_ds(ck, c, man, local_dir, model_factory, probe_fn, out_path) -> dict:
+    """DeepSpeed checkpoint -> safetensors (called by ckpt.export_safetensors once the files are downloaded
+    and checked). zero_to_fp32 rebuilds the full fp32 weights from the ZeRO pieces on one CPU process: it
+    needs memory for the whole fp32 model (about 4 bytes per parameter; 280 GB for 70B, see the impact doc).
+
+    Proof: the rebuilt weights, cast to the dtype training used, must give the manifest's weights digest
+    bit for bit. That holds at any ZeRO stage. The probe loss is compared too, except at ZeRO-3, whose own
+    linear function rounds differently from a plain model."""
+    from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+    from safetensors.torch import load_file, save_file
+
+    sd = get_fp32_state_dict_from_zero_checkpoint(os.path.dirname(local_dir), tag=os.path.basename(local_dir))
+    model = model_factory()
+    model.load_state_dict(sd, strict=True)
+    h = hashlib.sha256()
+    full = {}
+    for k, t in model.state_dict().items():
+        shape, dt = man["keys"][k]
+        if list(t.shape) != shape:
+            raise StrictLoadError(f"export: {k} has shape {list(t.shape)}, checkpoint says {shape}")
+        full[f"model.{k}"] = t.to(getattr(torch, dt.split(".")[-1]))
+    fp = fingerprints(full)
+    for k, t in full.items():
+        h.update(f"{k}|{t.dtype}|{tuple(t.shape)}|{fp[k]};".encode())
+    if h.hexdigest() != man["weights_digest"]:
+        raise RestoreCheckError(f"export: rebuilt weights digest {h.hexdigest()} != saved {man['weights_digest']}")
+    save_file({k: v.contiguous() for k, v in model.state_dict().items()}, out_path,
+              metadata={"run_id": man["run_id"], "step": str(man["step"]), "weights_digest": man["weights_digest"],
+                        "backend": "deepspeed"})
+    shutil.rmtree(ck.local_run, ignore_errors=True)
+    fresh = model_factory()
+    fresh.load_state_dict(load_file(out_path), strict=True)
+    bits = float_bits(probe_fn(fresh))
+    saved = None if man["env"].get("zero_stage") == 3 else man["probe_loss"].get(device_class(fresh))
+    ok = saved is None or bits == saved
+    emit("export.done" if ok else "export.failed", step=man["step"], path=out_path, probe_equal=ok,
+         weights_equal=True, backend="deepspeed")
+    if not ok:
+        raise RestoreCheckError(f"export probe loss bits differ: saved={saved} exported={bits}")
+    return {"step": man["step"], "path": out_path, "probe_bits": bits, "backend": "deepspeed"}

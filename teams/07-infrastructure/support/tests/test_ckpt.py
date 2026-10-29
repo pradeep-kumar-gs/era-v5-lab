@@ -326,7 +326,7 @@ DS_ENV = {"V5_DEEPSPEED": "1", **({"DS_ACCELERATOR": "cpu"} if DEVICE == "cpu" e
 
 
 @needs_ds
-@parametrize("stage", [1, 2])
+@parametrize("stage", [1, 2, 3])
 def test_t18_deepspeed_bit_equal_resume(env, stage):
     """ZeRO-1/2: save with engine.save_checkpoint inside our commit protocol, restore in a new process,
     loss equal as raw bits; DeepSpeed's own `latest` file is never written."""
@@ -342,7 +342,8 @@ def test_t18_deepspeed_bit_equal_resume(env, stage):
     st = env.store("ds")
     man = st.get_json(f"{env.latest('ds')['path']}/MANIFEST.json")
     assert man["backend"] == "deepspeed" and man["env"]["zero_stage"] == stage
-    assert {"mp_rank_00_model_states.pt", "zero_pp_rank_1_mp_rank_00_optim_states.pt"} <= set(man["files"])
+    weights = "zero_pp_rank_1_mp_rank_00_model_states.pt" if stage == 3 else "mp_rank_00_model_states.pt"
+    assert {weights, "zero_pp_rank_1_mp_rank_00_optim_states.pt"} <= set(man["files"])
     assert not st.exists("main/latest")
 
 
@@ -366,8 +367,47 @@ def test_t19_deepspeed_load_none_falls_back_not_fresh(env):
 @needs_ds
 def test_t20_deepspeed_world_change_holds(env):
     """ZeRO pieces are per rank: resume at another world size is refused with exit 78 (operator converts
-    with ds_to_universal.py), even with --allow-env-change."""
+    with ds_to_universal.py). It must say so even though ds_config differs too (per-GPU batch size): found in
+    the Docker drill, where the environment error came first and hid the real cause."""
     env.run("--run-id", "dw", "--steps", 8, "--interval-s", 999, world=2, check=0, env_extra=DS_ENV)
-    p = env.run("--run-id", "dw", "--steps", 12, "--allow-env-change", world=1, check=78, env_extra=DS_ENV)
+    p = env.run("--run-id", "dw", "--steps", 12, world=1, check=78, env_extra=DS_ENV)
     fatal = env.events_named("restore.fatal")
     assert fatal and fatal[0]["cause"] == "ReshardError" and "ds_to_universal" in fatal[0]["detail"], p.stderr[-2000:]
+
+
+@needs_ds
+def test_t21_zero3_pieces_fingerprint_as_full_weights(env):
+    """ZeRO-3 keeps only a flat piece of each weight per rank. The weights digest, built from those pieces,
+    must equal ZeRO-1's (full weights on every rank) for the same weights: no gather is needed to check."""
+    for stage in (1, 3):
+        env.run("--run-id", f"z{stage}", "--steps", 0, world=2, check=0, env_extra=dict(DS_ENV, V5_ZERO_STAGE=str(stage)))
+    m = {s: env.store(f"z{s}").get_json("main/step_00000000/MANIFEST.json") for s in (1, 3)}
+    assert m[1]["weights_digest"] == m[3]["weights_digest"] and m[1]["keys"] == m[3]["keys"]
+    assert m[1]["frozen"] == m[3]["frozen"]
+    # The probe loss is NOT compared: ZeRO-3 swaps in its own linear function (matmul + bias, not one addmm), so
+    # the same weights give a loss a few bits different. Resume needs the same stage (zero_stage must match).
+    assert m[1]["state_digest"] != m[3]["state_digest"]         # optimizer pieces differ by stage, by design
+
+
+@needs_ds
+@parametrize("stage", [1, 3])
+def test_t22_deepspeed_export_safetensors(env, stage):
+    """zero_to_fp32 rebuilds the full weights; they must give the saved weights digest bit for bit."""
+    env.run("--run-id", "dx", "--steps", 6, world=2, check=0, env_extra=dict(DS_ENV, V5_ZERO_STAGE=str(stage)))
+    out = str(env.tmp / "dx.safetensors")
+    r = export_safetensors(run_url(env.remote, "dx"), lambda: TinyLM(SEED), make_probe_fn(SEED), out)
+    assert r["backend"] == "deepspeed" and r["step"] == 6 and os.path.getsize(out) > 0
+
+
+@pytest.mark.skipif(not HAVE_DS or DEVICE != "cuda" or MAX_WORLD < 2, reason="DeepSpeed fp16 needs 2 CUDA GPUs (Kaggle 2xT4)")
+def test_t23_deepspeed_fp16_bit_equal_resume_on_gpu(env):
+    """fp16 with a dynamic loss scale (T4 has no bf16): the scale and fp32 master weights are in the checkpoint,
+    so a resume is bit-equal. The weights dtype is part of ds_config, so it is in the environment check too."""
+    straight, resumed = env.tmp / "straight.jsonl", env.tmp / "resumed.jsonl"
+    e = dict(DS_ENV, V5_DS_PRECISION="fp16")
+    env.run("--run-id", "fs", "--steps", 30, "--interval-s", 999, "--loss-log", straight, world=2, check=0, env_extra=e)
+    env.run("--run-id", "fr", "--steps", 15, "--interval-s", 999, "--loss-log", resumed, world=2, check=0, env_extra=e)
+    env.run("--run-id", "fr", "--steps", 30, "--interval-s", 999, "--loss-log", resumed, world=2, check=0, env_extra=e)
+    assert losses(straight) == losses(resumed)
+    man = env.store("fr").get_json(f"{env.latest('fr')['path']}/MANIFEST.json")
+    assert set(v[1] for v in man["keys"].values()) == {"torch.float16"}

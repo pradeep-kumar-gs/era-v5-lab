@@ -13,7 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 \
     && /opt/venv/bin/pip install --no-cache-dir numpy==2.1.3 pyyaml==6.0.2 safetensors==0.4.5 pytest==8.3.3 boto3==1.35.36 "moto[s3,server]==5.0.18" \
-    && /opt/venv/bin/python -c "import torch, yaml, safetensors, boto3; print('torch', torch.__version__)"
+    && /opt/venv/bin/pip install --no-cache-dir setuptools==75.6.0 wheel==0.45.1 \
+    && DS_BUILD_OPS=0 /opt/venv/bin/pip install --no-cache-dir --no-build-isolation deepspeed==0.18.0 \
+    && DS_ACCELERATOR=cpu /opt/venv/bin/python -c "import torch, yaml, safetensors, boto3, deepspeed; print('torch', torch.__version__, 'deepspeed', deepspeed.__version__)"
+# DeepSpeed (support/docs/deepspeed_impact.md). No ops built: the trainer uses torch's AdamW and gloo, and there is
+# no compiler in the image, so a missing op fails at once instead of compiling at job start. On EC2 the image
+# pre-builds the CUDA ops (DS-3). No GPU in this cluster: DeepSpeed's CPU accelerator, gloo.
+ENV DS_ACCELERATOR=cpu
 ENV PATH=/opt/venv/bin:$PATH
 
 # The submit service user (ADR 0002 §7: students submit through one service user) and a user with

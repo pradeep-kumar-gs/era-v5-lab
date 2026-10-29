@@ -23,6 +23,10 @@ No Dataset? Turn **Internet = on** instead (needs a phone-verified Kaggle accoun
 pushed `infrastructure` branch. The notebook file does not ask for Internet itself; if it did, the import would
 fail with `Permission 'kernelSessions.enableInternet' was denied` on an unverified account.
 
+**DeepSpeed tests (T18–T23) need Internet = on**: `run_gpu_checks.py` installs `deepspeed==0.18.0` (the same
+version as the Docker cluster image), built without ops. With Internet off they are skipped, not failed, and
+`summary.md` says `DeepSpeed not installed`.
+
 No AWS keys, tokens or personal data are used or written.
 
 ## What each step proves
@@ -32,7 +36,8 @@ No AWS keys, tokens or personal data are used or written.
 | health_prolog / health_full | the health check reads real `nvidia-smi` values; missing DCGM/dmesg are `skipped`, never `pass` | 0003 §1 |
 | allreduce | NCCL across 2 GPUs gives exact sums; measured bus bandwidth | 0003 §1 |
 | nccl_timeout | a stuck GPU becomes a clean failure about 20 s after the timeout, with a flight-recorder trace | 0003 §2 |
-| ckpt_tests_cuda | T1–T10 with the trainer on GPU: **bit-equal resume on CUDA** in deterministic mode | 0001 §8 |
+| ckpt_tests_cuda | T1–T17 with the trainer on GPU: **bit-equal resume on CUDA** in deterministic mode; FSDP2 (T16) | 0001 §8 |
+| ckpt_tests_cuda (DeepSpeed) | T18–T22 on GPU: ZeRO-1/2/3 save inside our commit protocol, bit-equal resume, `load_checkpoint` failure falls back, world change holds, `zero_to_fp32` export; T23: **fp16** resume bit-equal (T4 has no bf16) | impact doc §1 |
 | bench_save | GPU → host copy speed (the stall) and save speed, replacing the cost model's assumptions | 0001 §2, 0004 §1 |
 
 ## Not covered on Kaggle
