@@ -32,6 +32,7 @@ from ckpt.ckpt import (EXIT_DONE, EXIT_FATAL, EXIT_RETRY, Checkpointer, Checkpoi
                        EnvMismatchError, NonFiniteError, StrictLoadError, float_bits)
 from common.events import emit  # noqa: E402
 from common.reasons import write_exit_note  # noqa: E402
+from ckpt.ds_ckpt import DSCheckpointer  # noqa: E402
 from trainer.tiny import FROZEN_KEYS, SyntheticLoader, TinyLM, lm_loss, make_probe_fn  # noqa: E402
 
 DEFAULT_CONFIG = os.path.join(HERE, "..", "config_v0.yaml")
@@ -123,6 +124,9 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default=os.environ.get("V5_DEVICE", "cpu"), choices=["cpu", "cuda"])
     ap.add_argument("--fsdp", action="store_true", default=os.environ.get("V5_FSDP") == "1",
                     help="shard weights and optimizer with FSDP2 (fully_shard) instead of DDP, like the real run")
+    ap.add_argument("--deepspeed", action="store_true", default=os.environ.get("V5_DEEPSPEED") == "1",
+                    help="train and checkpoint with a DeepSpeed ZeRO engine (support/docs/deepspeed_impact.md)")
+    ap.add_argument("--zero-stage", type=int, default=int(os.environ.get("V5_ZERO_STAGE", "1")), choices=[0, 1, 2])
     ap.add_argument("--crash-at", type=int, default=int(os.environ.get("CRASH_AT", "-1")),
                     help="test only: raise an unhandled error at this step (exit 1)")
     a = ap.parse_args(argv)
@@ -152,7 +156,26 @@ def main(argv=None) -> int:
 
     model = TinyLM(seed).to(dev)
     ddp = model
-    if a.fsdp and ws > 1:
+    optim = None
+    if a.deepspeed:
+        # DeepSpeed owns the optimizer and the gradient sync. fp32 keeps the CPU test bit-exact; the real
+        # run uses bf16. srun or torchrun has already started the process group (DS-3: no deepspeed launcher).
+        import deepspeed
+        if not dist.is_initialized():      # one process alone: start a group of 1, or DeepSpeed looks for MPI
+            for k, v in (("RANK", "0"), ("WORLD_SIZE", "1"), ("LOCAL_RANK", "0"), ("MASTER_ADDR", "127.0.0.1"),
+                         ("MASTER_PORT", "29500")):
+                os.environ.setdefault(k, v)
+            dist.init_process_group(backend="nccl" if dev.type == "cuda" else "gloo")
+        ds_cfg = {
+            "train_batch_size": a.global_batch, "train_micro_batch_size_per_gpu": a.global_batch // ws,
+            "gradient_accumulation_steps": 1, "gradient_clipping": clip,
+            "optimizer": {"type": "AdamW", "params": {"lr": a.lr, "torch_adam": True}},
+            "zero_optimization": {"stage": a.zero_stage, "reduce_scatter": False},
+            "checkpoint": {"tag_validation": "Fail", "use_node_local_storage": True},
+            "steps_per_print": 10 ** 9, "wall_clock_breakdown": False,
+        }
+        ddp, optim, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_cfg)
+    elif a.fsdp and ws > 1:
         # Every rank holds only its slice of each weight (DTensor). Checkpoint fingerprints, the probe forward
         # and DCP must then run on every rank together: this mode proves they do (test T16).
         try:
@@ -164,11 +187,12 @@ def main(argv=None) -> int:
         ddp = fully_shard(model)
     elif ws > 1:
         ddp = torch.nn.parallel.DistributedDataParallel(model, device_ids=[dev.index] if dev.type == "cuda" else None)
-    optim = torch.optim.AdamW(model.parameters(), lr=a.lr)
+    if optim is None:
+        optim = torch.optim.AdamW(model.parameters(), lr=a.lr)
     loader = SyntheticLoader(seed, a.global_batch, rank, ws)
     probe = make_probe_fn(seed)
-    ck = Checkpointer(a.run_id, a.local_root, a.remote_root, config_path=a.config, seed=seed,
-                      frozen_keys=FROZEN_KEYS)
+    ck = (DSCheckpointer if a.deepspeed else Checkpointer)(a.run_id, a.local_root, a.remote_root, config_path=a.config, seed=seed,
+                                                       frozen_keys=FROZEN_KEYS)
 
     try:
         info = ck.restore(ddp, optim, loader, probe, from_step=a.from_step, skip=a.skip,
@@ -226,10 +250,14 @@ def main(argv=None) -> int:
             else:
                 spike_run = 0
                 window.append(lv)
-            optim.zero_grad(set_to_none=True)
-            (ntp + 0.0 * mtp).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-            optim.step()
+            if a.deepspeed:
+                ddp.backward(ntp + 0.0 * mtp)   # the engine syncs grads, clips (gradient_clipping) and steps
+                ddp.step()
+            else:
+                optim.zero_grad(set_to_none=True)
+                (ntp + 0.0 * mtp).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+                optim.step()
             step += 1
             tokens += a.global_batch * 32
             if a.step_sleep:

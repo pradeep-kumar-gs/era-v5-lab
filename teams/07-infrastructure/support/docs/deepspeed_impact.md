@@ -205,6 +205,10 @@ The `load_path is None` line is the most important line in this section. A silen
 a successful restore and **overwrite good checkpoints** with an untrained model. Test T19 (new): delete one
 rank's file after the commit, then restore. It must fall back to the previous commit, never start at step 0.
 
+**Measured (DeepSpeed 0.19.8, 29 Oct):** with the weights file missing, `load_checkpoint` does not return None,
+it fails an `assert` (`AssertionError`). So `submission/ckpt/ds_ckpt.py` treats both the same way: None *or* an
+exception from `load_checkpoint` becomes `IntegrityError`, and restore tries the previous commit. T19 passes.
+
 ### 1.8 Security: checkpoints are now pickles
 
 `.pt` files are loaded with `torch.load`, and DeepSpeed needs full pickle loading (`weights_only=False`) for

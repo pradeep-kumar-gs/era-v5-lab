@@ -36,6 +36,15 @@ DEVICE = os.environ.get("V5_DEVICE", "cpu")
 MAX_WORLD = torch.cuda.device_count() if DEVICE == "cuda" else 4
 
 
+def local_rdzv():
+    """127.0.0.1 and a free port, not --standalone: --standalone waits on the host name, which some laptops
+    (macOS with a .local name) cannot resolve, and then every multi-rank test hangs."""
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return ["--master-addr", "127.0.0.1", "--master-port", str(s.getsockname()[1])]
+
+
 def needs(world):
     return pytest.mark.skipif(world > MAX_WORLD, reason=f"needs {world} ranks, have {MAX_WORLD}")
 
@@ -55,7 +64,7 @@ class Env:
         for k in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "SLURM_PROCID", "SLURM_NTASKS", "SLURM_LOCALID"):
             env.pop(k, None)
         launch = [sys.executable, TRAIN] if world == 1 else \
-            [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={world}", TRAIN]
+            [sys.executable, "-m", "torch.distributed.run", *local_rdzv(), f"--nproc_per_node={world}", TRAIN]
         cmd = launch + ["--local-root", self.local, "--remote-root", self.remote, *map(str, args)]
         p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
         if check is not None:
@@ -252,7 +261,7 @@ def test_t17_dtensor_digest_equals_full_digest(tmp_path, world):
     w = os.path.join(HERE, "dtensor_digest_worker.py")
     env = {k: v for k, v in os.environ.items() if k not in ("RANK", "WORLD_SIZE", "LOCAL_RANK")}
     subprocess.run([sys.executable, w, str(tmp_path / "one.json")], env=env, check=True, timeout=120)
-    p = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={world}",
+    p = subprocess.run([sys.executable, "-m", "torch.distributed.run", *local_rdzv(), f"--nproc_per_node={world}",
                         w, str(tmp_path / "many.json")], env=env, capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stderr[-3000:]
     assert json.load(open(tmp_path / "many.json"))["digest"] == json.load(open(tmp_path / "one.json"))["digest"]
@@ -304,3 +313,61 @@ def test_t13_loader_contract():
     """The synthetic loader passes the contract that Teams 01/02's real loader must pass."""
     from ckpt.loader_contract import check
     assert check(lambda r, w: SyntheticLoader(SEED, 8, r, w)) == []
+
+
+# ---- DeepSpeed backend (support/docs/deepspeed_impact.md). Needs `pip install deepspeed`; skipped otherwise.
+try:
+    import deepspeed  # noqa: F401
+    HAVE_DS = True
+except ImportError:
+    HAVE_DS = False
+needs_ds = pytest.mark.skipif(not HAVE_DS or MAX_WORLD < 2, reason="needs deepspeed and 2 ranks")
+DS_ENV = {"V5_DEEPSPEED": "1", **({"DS_ACCELERATOR": "cpu"} if DEVICE == "cpu" else {})}
+
+
+@needs_ds
+@parametrize("stage", [1, 2])
+def test_t18_deepspeed_bit_equal_resume(env, stage):
+    """ZeRO-1/2: save with engine.save_checkpoint inside our commit protocol, restore in a new process,
+    loss equal as raw bits; DeepSpeed's own `latest` file is never written."""
+    straight, resumed = env.tmp / "straight.jsonl", env.tmp / "resumed.jsonl"
+    e = dict(DS_ENV, V5_ZERO_STAGE=str(stage))
+    env.run("--run-id", "dss", "--steps", 30, "--interval-s", 999, "--loss-log", straight, world=2, check=0, env_extra=e)
+    env.run("--run-id", "ds", "--steps", 15, "--interval-s", 999, "--loss-log", resumed, world=2, check=0, env_extra=e)
+    env.run("--run-id", "ds", "--steps", 30, "--interval-s", 999, "--loss-log", resumed, world=2, check=0, env_extra=e)
+    a, b = losses(straight), losses(resumed)
+    assert sorted(a) == list(range(1, 31)) and a == b
+    done = [x for x in env.events_named("restore.done") if x["run_id"] == "ds"][0]
+    assert done["step"] == 15 and done["backend"] == "deepspeed"
+    st = env.store("ds")
+    man = st.get_json(f"{env.latest('ds')['path']}/MANIFEST.json")
+    assert man["backend"] == "deepspeed" and man["env"]["zero_stage"] == stage
+    assert {"mp_rank_00_model_states.pt", "zero_pp_rank_1_mp_rank_00_optim_states.pt"} <= set(man["files"])
+    assert not st.exists("main/latest")
+
+
+@needs_ds
+def test_t19_deepspeed_load_none_falls_back_not_fresh(env):
+    """load_checkpoint cannot load (its weights file is missing). That must fall back to the previous
+    commit, never start again at step 0 over good checkpoints."""
+    env.run("--run-id", "dn", "--steps", 20, "--interval-s", 0, "--step-sleep", 0.01, world=2, check=0, env_extra=DS_ENV)
+    st = env.store("dn")
+    newest = Checkpointer("dn", env.local, env.remote).commits()[-1]
+    man = st.get_json(f"{newest['path']}/MANIFEST.json")
+    del man["files"]["mp_rank_00_model_states.pt"]           # checksums still pass; DeepSpeed finds no weights
+    st.put_json(f"{newest['path']}/MANIFEST.json", man)
+    env.run("--run-id", "dn", "--steps", 24, "--interval-s", 999, world=2, check=0, env_extra=DS_ENV)
+    failed = env.events_named("restore.failed")
+    assert failed and failed[0]["step"] == newest["step"] and "could not load" in failed[0]["detail"]
+    started = [x for x in env.events_named("train.started") if x["run_id"] == "dn"]
+    assert not started[-1]["fresh"] and 0 < started[-1]["step"] < newest["step"]
+
+
+@needs_ds
+def test_t20_deepspeed_world_change_holds(env):
+    """ZeRO pieces are per rank: resume at another world size is refused with exit 78 (operator converts
+    with ds_to_universal.py), even with --allow-env-change."""
+    env.run("--run-id", "dw", "--steps", 8, "--interval-s", 999, world=2, check=0, env_extra=DS_ENV)
+    p = env.run("--run-id", "dw", "--steps", 12, "--allow-env-change", world=1, check=78, env_extra=DS_ENV)
+    fatal = env.events_named("restore.fatal")
+    assert fatal and fatal[0]["cause"] == "ReshardError" and "ds_to_universal" in fatal[0]["detail"], p.stderr[-2000:]

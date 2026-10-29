@@ -66,7 +66,12 @@ def test_forced_fail_and_schema(tmp_path, monkeypatch):
 
 def test_allreduce_exact_on_gloo(tmp_path):
     out = tmp_path / "ar.json"
-    p = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
+    import socket
+    with socket.socket() as so:         # 127.0.0.1, not --standalone: a .local host name may not resolve
+        so.bind(("127.0.0.1", 0))
+        port = str(so.getsockname()[1])
+    p = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--master-addr", "127.0.0.1",
+                        "--master-port", port, "--nproc_per_node=2",
                         os.path.join(SUB, "health", "allreduce_test.py"), "--max-mb", "4", "--iters", "3", "--out", str(out)],
                        capture_output=True, text=True, timeout=120)
     r = json.load(open(out))
