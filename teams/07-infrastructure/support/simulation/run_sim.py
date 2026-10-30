@@ -416,6 +416,37 @@ def d_db_backup():
     record("db_backup_restore", ok, **res)
 
 
+def d_split_brain():
+    """Two attempts alive at once: a node is cut off, Slurm starts a new job, the old one keeps running. Here a
+    new attempt claims the run (epoch + 1) while the main job still trains. The main job is now the old attempt:
+    its next commit must be refused, it must stop with 78 (FencedError, no requeue) and the pointer must not
+    move. Then the operator resubmits and the run resumes from that same checkpoint (ADR 0001 §3)."""
+    jid, host, hosts = node_of_main(0)
+    wait_fresh_commit()
+    t = mark("split_brain", cause_class="software")
+    out = ctl(f". /etc/v5/node.env; RUN_ID={RUN} V5_EVENTS_DIR=/s3/events {PY} -c \"import sys; "
+              f"sys.path.insert(0,'/opt/v5/submission'); from ckpt.ckpt import Checkpointer; "
+              f"print(Checkpointer('{RUN}', '/tmp/claim', '{REMOTE}').claim())\"")
+    epoch = int(out.stdout.strip().splitlines()[-1])
+    claimed = latest()
+    tc = ev_after(t, "checkpoint.claimed")["time"]
+    held = wait(lambda: ev_after(t, "job.held"), 120, "old attempt held")
+    after = latest()
+    fenced = ev_after(t, "checkpoint.fenced", phase="commit") or {}
+    late = [e["step"] for e in events() if e["event"] == "checkpoint.committed" and e["run_id"] == RUN
+            and e["time"] > tc]
+    record("split_brain_fenced", held["cause"] == "FencedError" and bool(fenced) and not late
+           and (after["path"], after["epoch"]) == (claimed["path"], epoch),
+           epoch=epoch, pointer_step=after["step"], refused_step=fenced.get("step"), commits_after_claim=late,
+           cause=held["cause"])
+    ctl(f"scancel {jid}")
+    t2 = mark("resume_after_fence", cause_class="operator")
+    sbatch("/opt/v5/submission/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
+    rd, fs = wait_recovered(t2)
+    record("resume_after_fence", rd["step"] == claimed["step"] and latest()["epoch"] == epoch + 1,
+           restored_step=rd["step"], epoch=latest()["epoch"])
+
+
 def d_nan_rollback_reshard():
     jid, host, _ = node_of_main(0)
     cur = last_step_before("9999")
@@ -601,7 +632,7 @@ def main():
     plan += [("kill_during_save", d_kill_during_save), ("kill_during_restore", d_kill_during_restore),
              ("spot", d_spot), ("health", d_health), ("two_nodes_down", d_two_nodes_down), ("hang", d_hang),
              ("node_loss", d_node_loss), ("ctld_failover", d_ctld_failover), ("db_backup", d_db_backup),
-             ("nan", d_nan_rollback_reshard), ("budget", d_budget_fairshare), ("retention", d_retention_export),
+             ("split_brain", d_split_brain), ("nan", d_nan_rollback_reshard), ("budget", d_budget_fairshare), ("retention", d_retention_export),
              ("live_alerts", d_live_alerts)]
     if a.only:
         plan = [(n, f) for n, f in plan if n in a.only]

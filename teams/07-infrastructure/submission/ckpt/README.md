@@ -46,7 +46,8 @@ Every rule below exists to stop one of these from costing money.
    │ 4. each rank writes sums_rank<r>.json       │
    │ 5. rank 0 re-checks every object in S3      │
    │ 6. rank 0 writes MANIFEST.json  (LAST file) │
-   │ 7. move latest.json → this step             │  ← only now does the checkpoint "count"
+   │ 7. move latest.json → this step, only if    │  ← only now does the checkpoint "count"
+   │    no newer attempt claimed the run         │    (fencing, below)
    │ 8. append a line to commits.jsonl           │
    └────────────────────────────────────────────┘
 ```
@@ -54,6 +55,14 @@ Every rule below exists to stop one of these from costing money.
 **The key idea: the receipt is written last.** If anything dies halfway (power, kill, network), there is no
 `MANIFEST.json` and `latest.json` still points at the previous good checkpoint. A half-written checkpoint can
 never be picked.
+
+**Only the newest attempt may commit (fencing).** Slurm can think a job is dead while it still runs (a node
+loses its network, Slurm starts a new job, the network comes back). Then two copies of the run train and save.
+So every attempt takes a ticket number, the *epoch*, before it restores: it writes `latest.json` with
+`epoch + 1`, and S3 accepts that write only if `latest.json` has not changed since it was read (`If-Match`).
+Every later commit is conditional the same way. After a newer claim, the old copy's next commit is refused, it
+logs `checkpoint.fenced` and exits 78 (`FencedError`). It can never move the pointer back, and since each attempt
+writes into its own `step_<N>-e<epoch>` folders, the two never mix files (tests T24–T26, drill `split_brain`).
 
 ---
 
@@ -80,9 +89,9 @@ Not saved: gradients, activations, NCCL state. They are rebuilt on the next step
 ### Where it lives
 
 ```text
-<remote_root>/<run_id>/latest.json             pointer to the newest committed checkpoint
+<remote_root>/<run_id>/latest.json             pointer to the newest committed checkpoint, + the owning epoch
 <remote_root>/<run_id>/commits.jsonl           every commit in order (restore never "lists folders")
-<remote_root>/<run_id>/<branch>/step_<N>/      DCP shard files, extra_rank<r>.json, sums_rank<r>.json, MANIFEST.json
+<remote_root>/<run_id>/<branch>/step_<N>-e<E>/ DCP shard files, extra_rank<r>.json, sums_rank<r>.json, MANIFEST.json
 ```
 
 `remote_root` is `s3://bucket/prefix` on AWS (and in the Docker test, through an S3 emulator), or a plain
@@ -228,6 +237,12 @@ checksum S3 stored at upload and downloads nothing (TB-size checkpoints).
 | T11 | loss × 10 for 5 steps (no NaN) | no save during the spike, exit 78, `latest` from before |
 | T12 | 300 normal steps | spike guard never trips |
 | T13 | data-loader contract | our synthetic loader passes |
+| T14–T17 | fingerprints of sharded tensors, FSDP2 (GPU), real DTensors | equal to the full-tensor fingerprint |
+| T18–T23 | the DeepSpeed backend (`ds_ckpt.py`) | see `support/docs/deepspeed_impact.md` §1.12 |
+| T24 | a second attempt claims the run while the first still trains | the first one's next commit is refused; pointer stays the second's |
+| T25 | the same with two real trainer processes | the old one exits 78 `FencedError`; none of its commits land after the claim |
+| T26 | conditional writes, folder store and S3 emulator | old version loses; 60 parallel appends lose no line; 4 claims at once never share an epoch |
+| T27 | async save on CPU, slow writer, weights change right after `save()` | the checkpoint still restores exactly what was saved (we copy CPU tensors ourselves) |
 
 Run them from `teams/07-infrastructure`:
 

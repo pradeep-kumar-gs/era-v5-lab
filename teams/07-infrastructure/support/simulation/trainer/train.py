@@ -225,6 +225,13 @@ def main(argv=None) -> int:
     if rank == 0:
         emit("train.started", step=step, world=ws, fresh=info is None, branch=ck.branch)
 
+    def fenced_exit(at):
+        """A newer attempt owns the run (FencedError): stop, and never retry this attempt."""
+        if rank == 0:
+            emit("train.exit", step=at, code=EXIT_FATAL, cause="FencedError")
+            write_exit_note(EXIT_FATAL, "FencedError", at, "a newer attempt claimed the run; this one stopped")
+        return EXIT_FATAL
+
     wd = Watchdog(a.watchdog_s)
     wd.start()
     last_save = time.monotonic()
@@ -294,14 +301,19 @@ def main(argv=None) -> int:
             # Never save in the middle of a loss spike: the state may already be damaged.
             due = rank == 0 and step < a.steps and spike_run == 0 and time.monotonic() - last_save >= a.interval_s
             flags = torch.tensor([1 if due else 0,
-                                  1 if stop["sig"] else 0], dtype=torch.int32, device=dev)
+                                  1 if stop["sig"] else 0,
+                                  1 if ck.fenced else 0], dtype=torch.int32, device=dev)
             if dist.is_initialized():
                 dist.all_reduce(flags, op=dist.ReduceOp.MAX)
+            if flags[2]:
+                return fenced_exit(step)
             if flags[1]:
                 if rank == 0:
                     emit("train.stop_requested", step=step, signal=stop["sig"] or "peer")
                 ck.save(step, ddp, optim, loader, probe, tokens, reason="signal")
                 ok = ck.wait()
+                if ck.any_fenced():
+                    return fenced_exit(step)
                 if rank == 0:
                     emit("train.exit", step=step, code=EXIT_RETRY, committed=ok)
                     write_exit_note(EXIT_RETRY, "saved_and_stopped", step,
@@ -313,6 +325,8 @@ def main(argv=None) -> int:
 
         ck.save(step, ddp, optim, loader, probe, tokens, reason="final")
         ok = ck.wait()
+        if ck.any_fenced():
+            return fenced_exit(step)
         if rank == 0:
             emit("train.exit", step=step, code=EXIT_DONE if ok else EXIT_RETRY, committed=ok)
             write_exit_note(EXIT_DONE if ok else EXIT_RETRY, "done" if ok else "crash", step,

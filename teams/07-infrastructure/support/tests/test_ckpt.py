@@ -27,7 +27,7 @@ sys.path[:0] = [SUB, SIM]
 from ckpt.ckpt import (Checkpointer, StrictLoadError, export_safetensors, run_retention, run_url)  # noqa: E402
 from ckpt.store import open_store  # noqa: E402
 from common.events import read_all  # noqa: E402
-from trainer.tiny import SyntheticLoader, TinyLM, make_probe_fn  # noqa: E402
+from trainer.tiny import SyntheticLoader, TinyLM, lm_loss, make_probe_fn  # noqa: E402
 
 TRAIN = os.path.join(SIM, "trainer", "train.py")
 SEED = 1234
@@ -137,10 +137,11 @@ def test_t4_crash_before_seal(env):
     latest = env.latest("k")
     p = env.run("--run-id", "k", "--steps", 14, "--interval-s", 999, env_extra={"V5_TEST_CRASH_BEFORE_SEAL": "1"})
     assert p.returncode == 9
-    assert env.latest("k") == latest
-    assert not env.store("k").exists("main/step_00000014/MANIFEST.json")
+    now = env.latest("k")      # the second attempt claimed epoch 2, but the pointer did not move
+    assert (now["step"], now["path"], now["epoch"]) == (latest["step"], latest["path"], latest["epoch"] + 1)
+    assert not env.store("k").exists("main/step_00000014-e2/MANIFEST.json")
     out = run_retention(run_url(env.remote, "k"), orphan_age_s=0)
-    assert "main/step_00000014" in out["orphans"] and latest["path"] in out["protected"]
+    assert "main/step_00000014-e2" in out["orphans"] and latest["path"] in out["protected"]
 
 
 def test_t5_renamed_key_strict_load(env, monkeypatch):
@@ -381,7 +382,7 @@ def test_t21_zero3_pieces_fingerprint_as_full_weights(env):
     must equal ZeRO-1's (full weights on every rank) for the same weights: no gather is needed to check."""
     for stage in (1, 3):
         env.run("--run-id", f"z{stage}", "--steps", 0, world=2, check=0, env_extra=dict(DS_ENV, V5_ZERO_STAGE=str(stage)))
-    m = {s: env.store(f"z{s}").get_json("main/step_00000000/MANIFEST.json") for s in (1, 3)}
+    m = {s: env.store(f"z{s}").get_json(env.latest(f"z{s}")["path"] + "/MANIFEST.json") for s in (1, 3)}
     assert m[1]["weights_digest"] == m[3]["weights_digest"] and m[1]["keys"] == m[3]["keys"]
     assert m[1]["frozen"] == m[3]["frozen"]
     # The probe loss is NOT compared: ZeRO-3 swaps in its own linear function (matmul + bias, not one addmm), so
@@ -411,3 +412,159 @@ def test_t23_deepspeed_fp16_bit_equal_resume_on_gpu(env):
     assert losses(straight) == losses(resumed)
     man = env.store("fr").get_json(f"{env.latest('fr')['path']}/MANIFEST.json")
     assert set(v[1] for v in man["keys"].values()) == {"torch.float16"}
+
+
+# ----------------------------------------------------------------------------- fencing (T24-T26, ADR 0001 §3)
+
+def tiny_state():
+    model = TinyLM(SEED)
+    return model, torch.optim.AdamW(model.parameters(), lr=1e-3), SyntheticLoader(SEED, 8, 0, 1), make_probe_fn(SEED)
+
+
+def train_steps(model, optim, loader, n):
+    for _ in range(n):
+        ntp, mtp = lm_loss(model, loader.next())
+        optim.zero_grad(set_to_none=True)
+        (ntp + 0.0 * mtp).backward()
+        optim.step()
+
+
+def test_t24_old_attempt_cannot_commit_after_takeover(env, monkeypatch):
+    """Split brain: attempt A is still alive when attempt B starts (a node lost its network, Slurm started a
+    new job). B claims epoch 2. A's next commit is refused, the pointer stays B's, and A's files sit in their
+    own folder, never mixed with B's."""
+    monkeypatch.setenv("V5_EVENTS_DIR", env.events)
+    monkeypatch.setenv("V5_ASYNC_SAVE", "0")
+    mk = lambda: Checkpointer("zb", env.local + "_" + str(len(os.listdir(env.tmp))), env.remote, seed=SEED)
+    a = mk()
+    ma, oa, la, pa = tiny_state()
+    assert a.restore(ma, oa, la, pa) is None and a.epoch == 1
+    train_steps(ma, oa, la, 2)
+    assert a.save(2, ma, oa, la, pa) and a.wait()
+
+    b = mk()
+    mb, ob, lb, pb = tiny_state()
+    info = b.restore(mb, ob, lb, pb)
+    assert info["step"] == 2 and b.epoch == 2
+
+    train_steps(ma, oa, la, 2)              # A does not know: it trains on and tries to commit step 4
+    assert a.save(4, ma, oa, la, pa) and not a.wait() and a.fenced and a.any_fenced()
+    assert env.latest("zb")["epoch"] == 2 and env.latest("zb")["path"] == "main/step_00000002-e1"
+    assert [c["step"] for c in a.commits()] == [2]                   # A's step 4 is not in the history
+    assert [e["phase"] for e in env.events_named("checkpoint.fenced")] == ["commit"]
+
+    train_steps(mb, ob, lb, 2)              # B commits its own step 4, in its own folder
+    assert b.save(4, mb, ob, lb, pb) and b.wait()
+    assert env.latest("zb")["path"] == "main/step_00000004-e2"
+    assert [(c["step"], c["epoch"]) for c in b.commits()] == [(2, 1), (4, 2)]
+    assert env.store("zb").exists("main/step_00000004-e1/MANIFEST.json")    # A's sealed copy: never pointed to
+
+
+def test_t25_zombie_trainer_stops_with_78(env):
+    """The same, end to end: trainer A runs and commits every step; trainer B starts on the same run. A's next
+    commit is refused and A exits 78 (FencedError: hold, never requeue). No A commit lands after B's claim."""
+    cmd = [sys.executable, TRAIN, "--local-root", env.local + "_a", "--remote-root", env.remote,
+           "--run-id", "zt", "--steps", 100000, "--interval-s", 0, "--step-sleep", 0.05]
+    a = subprocess.Popen(list(map(str, cmd)), env=dict(os.environ, V5_EVENTS_DIR=env.events, OMP_NUM_THREADS="1",
+                                                       PYTHONWARNINGS="ignore"),
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        t0 = time.time()
+        while not (env.store("zt").exists("latest.json") and (env.latest("zt").get("step") or 0) >= 3):
+            assert a.poll() is None and time.time() - t0 < 120, "trainer A did not commit"
+            time.sleep(0.2)
+        env.run("--run-id", "zt", "--steps", 0, check=0)               # B: claim, restore, final save, done
+        assert a.wait(timeout=120) == 78, a.stdout.read()[-3000:]
+    finally:
+        if a.poll() is None:
+            a.kill()
+    claimed = [e for e in env.events_named("checkpoint.claimed") if e["epoch"] == 2][0]
+    latest = env.latest("zt")
+    commits = [json.loads(x) for x in env.store("zt").get_text("commits.jsonl").splitlines()]
+    assert latest["epoch"] == 2 and latest["step"] == claimed["step"] and latest["path"].endswith("-e2")
+    assert max(c["step"] for c in commits if c["epoch"] == 1) == claimed["step"]
+    ex = [e for e in env.events_named("train.exit") if e.get("cause") == "FencedError"]
+    assert len(ex) == 1 and ex[0]["code"] == 78
+
+
+@parametrize("kind", ["local", "s3"])
+def test_t26_store_conditional_writes(tmp_path, monkeypatch, kind):
+    """The two store operations fencing rests on. put_json_if: a write against an old version loses.
+    append_line: many writers at once never drop a line (S3 has no append; a plain read-modify-write would).
+    Two attempts claiming at the same moment never get the same epoch. s3 runs on the moto S3 emulator."""
+    import threading
+    from ckpt.store import Conflict
+    mock = None
+    base = os.environ.get("V5_TEST_REMOTE", "")
+    if kind == "s3" and base.startswith("s3://"):
+        url = f"{base.rstrip('/')}/{tmp_path.name}"     # the emulator server in Docker, or the real bucket
+    elif kind == "s3":
+        moto = pytest.importorskip("moto")
+        monkeypatch.delenv("V5_S3_ENDPOINT", raising=False)
+        mock = moto.mock_aws()
+        mock.start()
+        import boto3
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="v5-ckpt")
+        url = "s3://v5-ckpt/t26"
+    else:
+        url = str(tmp_path / "s3")
+    try:
+        st = open_store(url)
+        v1 = st.put_json_if("p.json", {"n": 1}, None)
+        with pytest.raises(Conflict):
+            st.put_json_if("p.json", {"n": 9}, None)                  # must not exist: it does
+        v2 = st.put_json_if("p.json", {"n": 2}, v1)
+        with pytest.raises(Conflict):
+            st.put_json_if("p.json", {"n": 9}, v1)                    # stale version: loses
+        assert st.get_json_ver("p.json") == ({"n": 2}, v2)
+
+        def appender(w):
+            for i in range(10):
+                open_store(url).append_line("log.jsonl", f"{w}:{i}")
+        ts = [threading.Thread(target=appender, args=(w,)) for w in range(6)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        lines = st.get_text("log.jsonl").splitlines()
+        assert sorted(lines) == sorted(f"{w}:{i}" for w in range(6) for i in range(10))
+
+        got, errs = [], []
+
+        def claimer():
+            try:
+                got.append(Checkpointer("race", str(tmp_path / f"n{threading.get_ident()}"), url, seed=SEED).claim())
+            except Exception as e:  # noqa: BLE001
+                errs.append(type(e).__name__)
+        ts = [threading.Thread(target=claimer) for _ in range(4)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert len(got) == len(set(got)) and len(got) + len(errs) == 4 and set(errs) <= {"FencedError"}
+        assert open_store(run_url(url, "race")).get_json("latest.json")["epoch"] == max(got)
+    finally:
+        if mock:
+            mock.stop()
+
+
+def test_t27_async_save_owns_its_copy(env, monkeypatch):
+    """dcp.async_save does not copy tensors that are already on the CPU. If we passed the live state, the
+    background writer would save weights the optimizer keeps changing, and the committed checkpoint would fail its
+    own restore proofs (kill_during_save drill, run 13). Here the writer is made slow, the weights change right
+    after save() returns, and the checkpoint must still restore exactly what was saved."""
+    from concurrent.futures import ThreadPoolExecutor
+    import torch.distributed.checkpoint as dcp
+    monkeypatch.setenv("V5_EVENTS_DIR", env.events)
+    monkeypatch.setenv("V5_ASYNC_SAVE", "1")
+    # torch 2.5.1's async_save (the Docker image) without its copy, and slow: newer torch copies when it stages,
+    # so this stand-in makes the test fail without own_cpu_copies on every torch version.
+    pool = ThreadPoolExecutor(1)
+    monkeypatch.setattr(dcp, "async_save", lambda state, checkpoint_id=None, process_group=None: pool.submit(
+        lambda: (time.sleep(1.0), dcp.save(state, checkpoint_id=checkpoint_id))[1]))
+    ck = Checkpointer("as", env.local, env.remote, seed=SEED)
+    model, optim, loader, probe = tiny_state()
+    train_steps(model, optim, loader, 2)
+    assert ck.async_save and ck.save(2, model, optim, loader, probe)
+    train_steps(model, optim, loader, 3)        # while the writer still sleeps: the live weights move on
+    assert ck.wait()
+
+    m2, o2, l2, p2 = tiny_state()
+    info = Checkpointer("as", env.local + "_2", env.remote, seed=SEED).restore(m2, o2, l2, p2)
+    assert info["step"] == 2 and not env.events_named("restore.failed")

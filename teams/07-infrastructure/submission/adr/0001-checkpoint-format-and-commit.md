@@ -90,18 +90,48 @@ Not saved: gradients, activations, NCCL state.
    node-local NVMe from a background thread, on a separate **gloo** process group so it never shares NCCL with
    training. The fingerprint is integer sums on the GPU (milliseconds); there is no sha256 of the state on the
    stall path. `V5_ASYNC_SAVE=0` falls back to the blocking `dcp.save` (used to compare stall times).
-5. **Background:** each rank waits for its DCP write to finish, then uploads its own files to `s3://…/<run>/<branch>/step_<N>/` through `ckpt/store.py`
+   **We hand `async_save` our own copy of every CPU tensor.** DCP's staging moves tensors to host memory, but a
+   tensor already on the CPU is passed through without a copy (torch 2.5.1), so the background writer would
+   read weights the optimizer keeps changing, and the files would hold a later state than the recorded digest.
+   Found by the `kill_during_save` drill in run 13: the newest commit failed its own restore proofs (CK-05) and
+   the job fell back one checkpoint. Fixed with `own_cpu_copies()`; T27 reproduces the race. GPU tensors are
+   copied by DCP itself (to be confirmed on Kaggle).
+5. **Background:** each rank waits for its DCP write to finish, then uploads its own files to `s3://…/<run>/<branch>/step_<N>-e<epoch>/` through `ckpt/store.py`
    (boto3: multipart above 64 MB, 16 parallel parts, standard retry mode for `503 SlowDown`). Each object
    carries its sha256 in metadata and S3 verifies a SHA256 checksum on upload. Then the rank writes
    `sums_rank<r>.json`.
 6. Rank 0 waits for every rank's sums, re-checks every object in S3, writes `MANIFEST.json` **last**, then moves
-   `latest.json` and appends to `commits.jsonl`, and emits `checkpoint.committed` (ADR 0002 §8).
+   `latest.json` **with a conditional write** (fencing, below) and appends to `commits.jsonl`, and emits
+   `checkpoint.committed` (ADR 0002 §8).
    Re-check mode `V5_VERIFY_MODE`: `full` re-reads and hashes every object (tests, small checkpoints);
    `head` compares the checksum S3 stored at upload, which costs no download (TB-size checkpoints).
 
 **One interface, two stores** (`ckpt/store.py`): `LocalStore` (a folder) and `S3Store` (boto3). The Docker
 cluster runs `S3Store` against an S3 emulator (moto), so the code that will run on AWS has already run through
-every drill. S3 has no append: `commits.jsonl` is read-modify-written by rank 0 of the one job that owns the run.
+every drill. S3 has no append: `commits.jsonl` is read, extended and written back **only if nobody wrote it in
+between** (`If-Match`), else read again, so two writers never lose each other's line.
+
+**Fencing: only one attempt may commit.**
+
+> **In simple words.** Slurm can believe a job is dead while it still runs: a node loses its network, Slurm
+> requeues the job, then the network comes back. Now two copies of the run train and save. Without a guard,
+> the old copy could commit after the new one and move `latest.json` back, or the two could write files into the
+> same folder. So each attempt takes a ticket number (the *epoch*) when it starts, and the pointer only accepts
+> writes from the newest ticket.
+
+- On start, before it reads anything, the attempt **claims** the run: it writes `latest.json` with `epoch + 1`,
+  only if `latest.json` is still the version it read (`If-Match` on the S3 ETag; `If-None-Match: *` for a new
+  run). If two attempts claim at the same moment, exactly one wins; the other stops (`FencedError`).
+- Every commit writes `latest.json` only if it is still the version **this attempt** last wrote. After a newer
+  claim it is not, so the old attempt's commit is refused: `checkpoint.fenced`, then it exits **78**
+  (`FencedError`: hold, never requeue; a newer attempt already owns the run). Its sealed folder is never pointed
+  to and retention removes it.
+- Each attempt writes into its own folders, `step_<N>-e<epoch>`, so two attempts never overwrite each other's
+  files, even at the same step.
+- One object is the lock and the pointer at once, so there is no gap between "check the lease" and "move the
+  pointer". The folder store does the same with an `O_EXCL` lock file and a sha256 as the version.
+- S3 conditional writes (`If-Match` on PutObject) exist since Nov 2024; boto3 ≥ 1.35.69 sends them. The emulator
+  enforces them from moto 5.1.10 (older moto silently ignores `If-Match`, so a test on it would pass falsely).
 
 > **Node-local disk is a cache, never a copy that counts.** p6 instances' NVMe is *instance store*: it is wiped
 > when the instance stops (including Slurm power-saving) or is replaced. A restore always works from S3; the
@@ -117,7 +147,8 @@ Only one save is in flight at a time; a save that has to wait for the previous o
 > check the receipt, and then prove that what we loaded is exactly what we saved. If the newest checkpoint
 > fails a check, we fall back to the one before it automatically.
 
-1. Read `latest.json`; never list directories. Fallback order comes from `commits.jsonl`.
+1. Claim the run (fencing, §2). Then read `latest.json`; never list directories. Fallback order comes from
+   `commits.jsonl`.
 2. Check every file against the manifest checksums (rank 0), then copy it to local NVMe once per node.
 3. Check the environment; a mismatch refuses (exit 78) unless `--allow-env-change` is given, which is logged.
 4. **Strict key check:** every missing, extra, wrong-shape or wrong-dtype key aborts, and all of them are listed.
@@ -188,6 +219,7 @@ Changed from the first draft, which used 1 for fatal: an uncaught Python error (
 |---|---|
 | 01/02 Data | the loader exposes `state_dict()` / `load_state_dict()` returning JSON-serialisable state, and `next_batch_id()` with a content hash of the next batch. The state is **one global ledger offset + the skip list, identical on every rank** (each rank derives its slice from it); no per-rank positions. Reason: after a resharded restore every new rank loads old rank 0's state. The checkpointer checks this at every save (`loader_global` in the manifest) and refuses to reshard a checkpoint that fails it (`ReshardError`, exit 78); `ckpt/loader_contract.py` tests it, including a resume at another world size |
 | 05 Architecture | every tensor is trainable, frozen or a buffer, with a stable name. The parallel layout is given: ZeRO/FSDP stage, expert-parallel size. **Experts are stored by global expert id** (DTensor or an explicit index), so the checkpoint reshards when the EP size changes. Reversible models keep dropout at 0 |
+| 05 Training loop | the trainer calls `save()` only **between optimizer steps**, never between micro-batches of one step. With gradient accumulation (DeepSpeed `gradient_accumulation_steps` > 1) a stop signal is acted on at the next boundary (`engine.is_gradient_accumulation_boundary()`), so half-accumulated gradients never need saving. The stall budget (≤ 2 %) covers the extra wait of up to one step |
 | 04 KE2 | Kronecker tables and other non-trained tensors are declared frozen buffers and hashed in the manifest |
 | 05 + 06 Kernels | **every kernel has a deterministic mode**: no unordered atomics, a fixed reduction order, deterministic reversible recompute. Resume tests and the CI restore probe run in deterministic mode; production may run fast mode. A kernel without a deterministic mode is flagged in its docstring and in the manifest |
 | 06 Performance | owns the **GPU-to-host stall time** against our budget (≤ 2% of the interval); Team 07 owns correctness |
@@ -243,6 +275,7 @@ Good:
 - A checkpoint saved on 4 ranks restores on 2 or 1 (tested), so losing a node does not stop the run.
 - A warned interruption (preemption, spot, health drain) loses ≈ 0 work thanks to the emergency save.
 - Other teams get one checked export format.
+- Two live copies of one run (split brain) cannot both commit: the older one is refused and stops (T24–T25).
 
 Bad and accepted:
 
@@ -278,6 +311,11 @@ Bad and accepted:
 | T15 | a loader whose state differs per rank fails the contract ("must be one global ledger offset") | pass |
 | T16 | **FSDP2** (`fully_shard`) on 2 GPUs: save does not hang; restore at 2 ranks and resharded at 1 rank pass every check | GPU only: runs on Kaggle 2×T4 |
 | T17 | real DTensors on 2 and 3 gloo ranks (uneven `Shard(0)`, `Shard(1)`, `Replicate`): digest = single-process digest | pass |
+| T18–T23 | the DeepSpeed backend (ZeRO-1/2/3 resume, fallback, world change, export, fp16): see `support/docs/deepspeed_impact.md` §1.12 | pass (T23 GPU only) |
+| T24 | split brain in one process: attempt B claims the run; A's next commit is refused, the pointer stays B's, A's step is not in the history, B commits its own step in its own folder | pass |
+| T25 | the same end to end: trainer A commits every step, trainer B starts on the same run; A exits 78 (`FencedError`), no A commit lands after B's claim | pass |
+| T26 | the store operations, on the folder store and on S3 (moto): a write against an old version loses; 6 writers × 10 appends lose no line; 4 attempts claiming at once never share an epoch | pass |
+| T27 | async save on CPU with a slow writer, weights changed right after `save()` returns: the checkpoint still restores exactly what was saved (fails without `own_cpu_copies`) | pass |
 
 Simulation drills that exercise the checkpoint in Slurm (ADR 0002 §10): kill **during** a save (the half-uploaded
 checkpoint is never used), kill **during** a restore (the next attempt restores the same checkpoint cleanly),
@@ -295,6 +333,8 @@ model of the final shape.
   reshard → restore path under FSDP2 runs as T16 on Kaggle 2×T4. Expert parallel and Team 05's real model wait
   for week 2. FSDP2 needs CUDA in torch 2.5, so the Docker cluster (CPU) still trains with DDP.
 - Real S3 throughput and `head` verification on a multi-GB checkpoint (week-2 node; the emulator is in-memory).
+  Run T26 once against the real bucket too (`V5_TEST_REMOTE=s3://…`), to confirm AWS answers 412 the way the
+  emulator does; `launch.sh` runs `ckpt.py probe-store` on it before every launch.
 - Parallel layout: ZeRO-2 on 32 GPUs or ZeRO-3 on 8, and the EP degree. This sets the per-node share and the NVMe size.
 - Protected cadence N (Team 09).
 - The RPO cap the instructor accepts (start: 30 min).

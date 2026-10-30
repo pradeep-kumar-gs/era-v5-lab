@@ -131,6 +131,14 @@ CAUSES = {
         title="upload timeout", severity="medium",
         meaning="A rank did not finish its S3 upload in time.", auto="save not committed; training continues",
         you_do="check S3 errors and upload throughput (CK-11)", alert="CK-03"),
+    "FencedError": dict(
+        title="another attempt owns the run: stopped", severity="medium",
+        meaning="A newer attempt of this run claimed latest.json (a higher epoch), so this attempt may not commit. "
+                "Two attempts were alive at once: usually a node that lost its network, so Slurm started a new "
+                "job while the old one kept running.",
+        auto="this attempt's commit was refused and it stopped; the pointer and the newer attempt are untouched",
+        you_do="nothing for the run; find out why the old attempt was still alive (node network, slurmd) and "
+               "drain that node if it repeats", alert=None),
     "ReshardError": dict(
         title="cannot resume at this size: held", severity="high",
         meaning="The checkpoint was saved by a data loader that keeps a separate position per rank. At another "

@@ -121,6 +121,7 @@ class DSCheckpointer(Checkpointer):
 
     def save(self, step: int, model, optim, loader, probe_fn, tokens: int = 0, reason: str = "interval") -> bool:
         t = Timer()
+        self.claim()
         if rank() == 0:
             emit("checkpoint.started", step=step, reason=reason, branch=self.branch, backend="deepspeed")
         waited = 0.0
@@ -139,7 +140,7 @@ class DSCheckpointer(Checkpointer):
             raise NonFiniteError(f"NaN/Inf in the state at step {step}; not saved")
 
         save_dir = os.path.join(self.local_run, self.branch)
-        tag = f"step_{step:08d}"
+        tag = os.path.basename(self.step_rel(self.branch, step))   # step_<N>-e<epoch>: one folder per attempt
         local_dir = os.path.join(save_dir, tag)
         os.makedirs(save_dir, exist_ok=True)
         free = shutil.disk_usage(save_dir).free

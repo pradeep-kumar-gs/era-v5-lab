@@ -11,12 +11,18 @@ In simple words:
   moved only after that. So a half-written checkpoint can never be picked by mistake.
 - On restore we check the checkpoint before trusting it: checksums, exact key names and shapes, a
   digest of every tensor, and the loss of one fixed probe batch, compared bit for bit.
+- Only one attempt of a run may commit (fencing). A job that Slurm thinks is dead can still be running
+  (a node cut off from the network, then back). Each attempt claims a new "epoch" in `latest.json` before
+  it restores, and every later write of `latest.json` is conditional on the version that attempt wrote
+  (S3 If-Match). So an old attempt's commit is refused (FencedError) and it stops; it can never move the
+  pointer back. Each attempt also writes into its own step folders (`step_<N>-e<epoch>`), so two attempts
+  never mix files.
 
 Storage layout (the S3 bucket is a directory in the Docker test):
-    <remote_root>/<run_id>/latest.json             pointer to the newest committed checkpoint
+    <remote_root>/<run_id>/latest.json             pointer to the newest committed checkpoint + the epoch
     <remote_root>/<run_id>/commits.jsonl           every commit, in order (restore never lists dirs)
     <remote_root>/<run_id>/pins.json               steps a person has pinned (never deleted)
-    <remote_root>/<run_id>/<branch>/step_<N>/      DCP files, extra_rank<r>.json, sums_rank<r>.json, MANIFEST.json
+    <remote_root>/<run_id>/<branch>/step_<N>-e<E>/ DCP files, extra_rank<r>.json, sums_rank<r>.json, MANIFEST.json
 """
 import argparse
 import base64
@@ -40,7 +46,7 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from ckpt.store import open_store, wait_for  # noqa: E402
+from ckpt.store import Conflict, open_store, wait_for  # noqa: E402
 from common.events import Timer, emit  # noqa: E402
 
 # DCP warns about single-process use and storage internals; they are expected here.
@@ -85,6 +91,10 @@ class ReshardError(CheckpointError):
 
 class UploadTimeout(CheckpointError):
     """A rank did not finish its upload in time. This save is not committed; training continues."""
+
+
+class FencedError(CheckpointError):
+    """A newer attempt of this run has claimed `latest.json`. This attempt must not commit: stop."""
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -182,6 +192,23 @@ def flatten(sd, prefix: str = "") -> dict:
 
 def tensor_items(sd) -> list:
     return sorted((k, v) for k, v in flatten(sd).items() if isinstance(v, torch.Tensor))
+
+
+def own_cpu_copies(obj):
+    """The same state with every plain CPU tensor cloned (anything else, e.g. a GPU tensor, is left as is).
+
+    Why: dcp.async_save "stages" the state by moving it to host memory, but a tensor that is already on the CPU
+    is staged without a copy (torch 2.5: `_offload_state_dict_to_cpu` returns the same storage). The background
+    writer would then read weights the optimizer is already changing, and the files would hold a later state than
+    the digest we recorded. Found by the kill_during_save drill (run 13): the committed checkpoint failed its
+    restore proofs. GPU tensors are copied by DCP itself."""
+    if isinstance(obj, dict):
+        return {k: own_cpu_copies(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(own_cpu_copies(v) for v in obj)
+    if isinstance(obj, torch.Tensor) and not hasattr(obj, "placements") and obj.device.type == "cpu":
+        return obj.detach().clone()
+    return obj
 
 
 def local_part(t: torch.Tensor) -> torch.Tensor:
@@ -385,17 +412,65 @@ class Checkpointer:
         self.last_rank_bytes = 0
         self.last_commit_step = None
         self.last_commit_time = None
+        self.epoch = None        # this attempt's claim on latest.json (fencing); set by claim()
+        self._ptr_ver = None     # version of latest.json this attempt last wrote (S3 ETag)
+        self.fenced = False      # rank 0: a commit was refused because a newer attempt took over
         os.makedirs(self.local_run, exist_ok=True)
 
     # ---- paths
     def step_rel(self, branch: str, step: int) -> str:
-        return f"{branch}/step_{step:08d}"
+        return f"{branch}/step_{step:08d}-e{self.epoch}"
+
+    # ---- fencing (ADR 0001 §3)
+    def claim(self) -> int:
+        """Claim the run for this attempt: epoch + 1 in latest.json, written only if latest.json is still the
+        version we read. Every rank calls it; rank 0 writes. Returns the new epoch.
+
+        In simple words: whoever claimed last owns the run. An older attempt that is still alive finds out
+        at its next commit (its conditional write fails) and stops without touching the pointer."""
+        if self.epoch is not None:
+            return self.epoch
+        out = None
+        if rank() == 0:
+            st = self.store
+            for _ in range(20):
+                cur, ver = st.get_json_ver("latest.json")
+                cur = cur or {"step": None, "branch": None, "path": None}
+                new = dict(cur, epoch=int(cur.get("epoch", 0)) + 1, job=os.environ.get("SLURM_JOB_ID"),
+                           host=platform.node(), claimed_at=time.time())
+                try:
+                    self._ptr_ver = st.put_json_if("latest.json", new, ver)
+                    out = (new["epoch"], None)
+                    emit("checkpoint.claimed", epoch=new["epoch"], previous=cur.get("epoch"), job=new["job"],
+                         step=cur.get("step"))
+                    break
+                except Conflict:
+                    after = st.get_json_ver("latest.json")[0] or {}
+                    if int(after.get("epoch", 0)) > int(cur.get("epoch", 0)):
+                        # another attempt claimed at the same moment: it is the newer one
+                        out = (None, f"attempt epoch {after.get('epoch')} claimed the run first")
+                        break
+                    # the old owner committed between our read and our write: read again
+            else:
+                out = (None, "latest.json kept changing; could not claim the run")
+        epoch, err = broadcast_obj(out)
+        if err:
+            if rank() == 0:
+                emit("checkpoint.fenced", phase="claim", detail=err)
+            raise FencedError(err)
+        self.epoch = epoch
+        return epoch
+
+    def any_fenced(self) -> bool:
+        """True on every rank if rank 0 had a commit refused (collective: all ranks must call it)."""
+        return not all_true(not self.fenced)
 
     # ---- save
     def save(self, step: int, model, optim, loader, probe_fn, tokens: int = 0, reason: str = "interval") -> bool:
         """Blocking part of a save (the stall). The upload and commit run in a background thread.
         Returns False if the save was skipped (no disk space). Raises NonFiniteError on NaN/Inf."""
         t = Timer()
+        self.claim()             # a no-op after restore(); a save without a restore claims here
         if rank() == 0:
             emit("checkpoint.started", step=step, reason=reason, branch=self.branch)
         waited = 0.0
@@ -433,9 +508,10 @@ class Checkpointer:
 
         # The stall ends when the state is copied to host memory. dcp.async_save does that copy, then writes
         # the files from a background thread on its own gloo group (so it never shares NCCL with training).
+        # It does not copy tensors that are already on the CPU, so we do (own_cpu_copies, test T27).
         fut = None
         if self.async_save:
-            fut = dcp.async_save(state, checkpoint_id=local_dir, process_group=self._save_group())
+            fut = dcp.async_save(own_cpu_copies(state), checkpoint_id=local_dir, process_group=self._save_group())
         else:
             dcp.save(state, checkpoint_id=local_dir)
         extra = {"step": step, "tokens": tokens, "world_size": world(), "rank": rank(),
@@ -521,9 +597,19 @@ class Checkpointer:
             if os.environ.get("V5_TEST_CRASH_BEFORE_SEAL") == "1":
                 os._exit(9)  # test T4 only: the process dies after the upload, before the seal
             st.put_json(f"{rel}/{MANIFEST}", manifest)
-            st.put_json("latest.json", {"step": step, "branch": self.branch, "path": rel})
+            # The commit point. Conditional: if a newer attempt claimed the run, this write fails and the
+            # pointer stays theirs. The MANIFEST above sits in this attempt's own folder and is never used.
+            try:
+                self._ptr_ver = st.put_json_if("latest.json", {
+                    "step": step, "branch": self.branch, "path": rel, "epoch": self.epoch,
+                    "job": os.environ.get("SLURM_JOB_ID"), "host": platform.node()}, self._ptr_ver)
+            except Conflict:
+                now = st.get_json_ver("latest.json")[0] or {}
+                raise FencedError(f"step {step} not committed: attempt epoch {now.get('epoch')} (job "
+                                  f"{now.get('job')}) owns the run, this attempt is epoch {self.epoch}")
             st.append_line("commits.jsonl", json.dumps({"step": step, "branch": self.branch, "path": rel,
-                                                        "time": manifest["committed_at"], "reason": meta["reason"]}))
+                                                        "time": manifest["committed_at"], "reason": meta["reason"],
+                                                        "epoch": self.epoch}))
             self.last_commit_step, self.last_commit_time = step, manifest["committed_at"]
             latency = round(time.time() - t_start, 4)
             emit("checkpoint.committed", step=step, branch=self.branch, reason=meta["reason"], stall_s=stall,
@@ -531,6 +617,9 @@ class Checkpointer:
                  bytes=total, store=st.kind, upload_gbps=round(nbytes * 8 / 1e9 / max(upload_s, 1e-6), 4))
         except Exception as e:  # noqa: BLE001 - every failure must become an event, then the caller decides
             self._ok = False
+            if isinstance(e, FencedError):
+                self.fenced = True
+                emit("checkpoint.fenced", phase="commit", step=step, epoch=self.epoch, detail=str(e)[:500])
             emit("checkpoint.failed", step=step, cause=type(e).__name__, detail=str(e)[:500])
         finally:
             if local_rank() == 0:
@@ -565,12 +654,14 @@ class Checkpointer:
         if not self.store.exists("latest.json"):
             return []
         first = self.store.get_json("latest.json")
-        rest = [c for c in reversed(commits) if c["path"] != first["path"]]
-        return [first] + rest
+        rest = [c for c in reversed(commits) if c["path"] != first.get("path")]
+        # a claim with no commit yet has path None: only the commit history is left to try
+        return ([first] if first.get("path") else []) + rest
 
     def restore(self, model, optim, loader, probe_fn, from_step: int = None, skip: int = 0,
                 new_branch: str = None, allow_env_change: bool = False):
         """Load the newest good checkpoint. Returns a dict about the restore, or None for a fresh start."""
+        self.claim()             # before reading anything: from here on an older attempt cannot commit
         cands = self.candidates(from_step)
         if not cands:
             if from_step is not None:
@@ -798,6 +889,36 @@ def export_safetensors(remote_run: str, model_factory, probe_fn, out_path: str, 
     return {"step": man["step"], "path": out_path, "probe_bits": bits}
 
 
+def probe_store(remote_run: str) -> dict:
+    """Pre-flight for a run's checkpoint store (launch.sh step `store`). Fencing (§3) is only safe if the store
+    refuses a write against an old version; an S3 endpoint or emulator that ignores If-Match would let two
+    attempts commit. Writes and deletes one scratch object; never touches latest.json."""
+    st = open_store(remote_run)
+    key = f"_probe/{platform.node()}-{os.getpid()}.json"
+    out = {"store": st.kind, "run": remote_run, "write": False, "stale_refused": False, "new_refused": False}
+    try:
+        v1 = st.put_json_if(key, {"n": 1}, None)
+        out["write"] = st.get_json_ver(key)[0] == {"n": 1}
+        st.put_json_if(key, {"n": 2}, v1)
+        try:
+            st.put_json_if(key, {"n": 3}, v1)
+        except Conflict:
+            out["stale_refused"] = True
+        try:
+            st.put_json_if(key, {"n": 4}, None)
+        except Conflict:
+            out["new_refused"] = True
+    except Exception as e:  # noqa: BLE001 - the probe reports, the operator decides
+        out["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+    finally:
+        try:
+            st.delete_prefix("_probe")
+        except Exception:  # noqa: BLE001
+            pass
+    out["ok"] = out["write"] and out["stale_refused"] and out["new_refused"]
+    return out
+
+
 # ----------------------------------------------------------------------------- CLI
 
 def main():
@@ -816,8 +937,14 @@ def main():
     p = sub.add_parser("pin", help="protect a step from retention")
     p.add_argument("--run", required=True)
     p.add_argument("--step", type=int, required=True)
+    ps = sub.add_parser("probe-store", help="before a run: can we write, read, and is a stale write refused?")
+    ps.add_argument("--run", required=True)
     a = ap.parse_args()
 
+    if a.cmd == "probe-store":
+        out = probe_store(a.run)
+        print(json.dumps(out))
+        return 0 if out["ok"] else 1
     if a.cmd == "retention":
         print(json.dumps(run_retention(a.run, a.keep, a.protect_every, a.dry_run), indent=1))
         return 0

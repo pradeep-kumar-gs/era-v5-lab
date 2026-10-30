@@ -3,7 +3,7 @@
 # the checkpoint code and the health checks before we pay for a single GPU hour.
 FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10
 RUN apt-get update && apt-get install -y --no-install-recommends \
         slurm-wlm slurmdbd slurm-wlm-mysql-plugin munge mariadb-client \
         python3 python3-venv procps iproute2 ca-certificates tini \
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pinned versions: one stack only (ADR 0002 §2). CPU wheels, because the test cluster has no GPU.
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 \
-    && /opt/venv/bin/pip install --no-cache-dir numpy==2.1.3 pyyaml==6.0.2 safetensors==0.4.5 pytest==8.3.3 boto3==1.35.36 "moto[s3,server]==5.0.18" \
+    && /opt/venv/bin/pip install --no-cache-dir numpy==2.1.3 pyyaml==6.0.2 safetensors==0.4.5 pytest==8.3.3 boto3==1.35.99 "moto[s3,server]==5.1.10" \
     && /opt/venv/bin/pip install --no-cache-dir setuptools==75.6.0 wheel==0.45.1 \
     && DS_BUILD_OPS=0 /opt/venv/bin/pip install --no-cache-dir --no-build-isolation deepspeed==0.18.0 \
     && DS_ACCELERATOR=cpu /opt/venv/bin/python -c "import torch, yaml, safetensors, boto3, deepspeed; print('torch', torch.__version__, 'deepspeed', deepspeed.__version__)"

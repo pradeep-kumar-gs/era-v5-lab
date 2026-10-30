@@ -38,6 +38,7 @@ Raw trainer exit codes (before the wrapper maps them to 75, or 78 after 3 crashe
 | `IntegrityError` | high | A checkpoint file does not match its sha256: damaged on disk, network or S3. | the damaged checkpoint is never used; a restore falls back to the previous commit | pin the last good checkpoint (ckpt.py pin); find the hop that corrupts data | CK-04 |
 | `RestoreCheckError` | high | The restored state is not the saved state (digest, probe loss, next batch or frozen hashes differ). | the job fell back to the previous commit | compare the two printed values in the job log; do not continue on that checkpoint | CK-05 |
 | `UploadTimeout` | medium | A rank did not finish its S3 upload in time. | save not committed; training continues | check S3 errors and upload throughput (CK-11) | CK-03 |
+| `FencedError` | medium | A newer attempt of this run claimed latest.json (a higher epoch), so this attempt may not commit. Two attempts were alive at once: usually a node that lost its network, so Slurm started a new job while the old one kept running. | this attempt's commit was refused and it stopped; the pointer and the newer attempt are untouched | nothing for the run; find out why the old attempt was still alive (node network, slurmd) and drain that node if it repeats |  |
 | `ReshardError` | high | The checkpoint was saved by a data loader that keeps a separate position per rank. At another world size those positions do not map to the new ranks, so data would repeat or be skipped. | restore refused before any step; nothing was lost | resubmit at the saved world size (the job log names it), or fix the loader to keep one global ledger offset (ckpt/loader_contract.py) | CK-06 |
 | `crash_ledger_unavailable` | medium | The crash was retried, but the crash count could not be written to the run's S3 folder, so the 3-in-30-min crash-loop cap is not counting. | job requeued as a normal crash | check S3 access from the batch node (the same fault usually also fails checkpoint uploads) | CK-03 |
 
@@ -77,3 +78,4 @@ After the fix: `scontrol update nodename=<node> state=resume`.
 | `PREEMPTED` | a team job gave its node to the main run; it saved and is back in the queue. |
 | `NODE_FAIL` | the node stopped answering (SlurmdTimeout 30 s); the job is requeued by Slurm. |
 | `REQUEUED` | the job is back in the queue and restarts from its last checkpoint. |
+

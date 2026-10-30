@@ -16,6 +16,8 @@ in a Docker copy of the Slurm cluster (31 of 31 drills, run 11 after the week-1 
 ```text
 submission/
 ├── README.md        ← you are here
+├── launch.sh        starts everything in order on the cluster, checking each step (see "Starting production")
+├── cluster.env.example  what launch.sh needs to know (hosts, store, run id)
 ├── adr/             the 4 decisions, each with an "In simple words" box
 ├── ckpt/            checkpoint      ckpt.py (save, commit, restore checks, retention, export), store.py (folder or S3)
 ├── queue/           job queue       job_queue.py (job wrapper, exit codes, crash loop, spot watcher, drain, status)
@@ -48,6 +50,42 @@ is still open).
 | Who gets the GPUs? | main run first (preempts); teams by fair share, ≤ 2 nodes, GPU-hour budgets | the main run cannot starve; no team grabs everything |
 | How do we find broken GPUs? | checks before every job and every 30 s; drain + save + move to the hot spare | a bad GPU costs seconds, not a crash |
 | How does a person know what to do? | every job, alert and drained node says what happened, what was done, what to do | `python metrics/explain.py <anything>` |
+
+## Starting production: `launch.sh`
+
+> **In simple words.** A cluster must start in a fixed order: logins, the accounting database, the
+> controllers, the accounts, the GPU nodes. Then we prove the nodes are healthy and the checkpoint store is
+> safe, and only then spend GPU hours on the main run. `launch.sh` does exactly that, one step at a time. It
+> waits for each step's check and stops on the first failure, saying which step failed and why. Every step is
+> safe to run twice, so after a fix you go on with `--from <step>`.
+
+```bash
+cp cluster.env.example /etc/v5/cluster.env     # hosts, store, run id (no secrets)
+./launch.sh --list                             # the steps
+./launch.sh --dry-run                          # what would run where, nothing changed
+./launch.sh                                    # start everything
+./launch.sh --from health                      # continue after fixing a failed step
+```
+
+| Step | What it proves before going on |
+|---|---|
+| preflight | settings complete, every host reachable, **the same code on every host** (the code goes into each checkpoint, so a mix would hold the run later) |
+| munge | `munged` everywhere, and every host accepts the controller's credential (one key, clocks in step) |
+| slurmdbd | accounting daemon answering |
+| dbbackup | today's DB dump **and a test restore** of it (a backup counts only after a restore) |
+| slurmctld | primary and backup controller UP (`scontrol ping`) |
+| accounts | `setup_accounts.sh`; the submit user has the `mainrun` association |
+| slurmd | every GPU node registered (a node drained on purpose stays drained) |
+| health | `health_check.py --mode full` on every node at once; a failing node drains itself; fewer healthy nodes than `V5_MIN_NODES` stops the launch |
+| services | hot-spare timer and alert watcher on the controllers, spot watcher on every node (systemd units in `slurm/`) |
+| store | `ckpt.py probe-store`: write, read, and **a stale write refused**. Fencing (ADR 0001 §3) depends on it; an S3 endpoint that ignores `If-Match` stops the launch here |
+| submit | main run submitted unless already queued; it claimed its epoch, restored and started |
+| status | `job_queue.py status` |
+
+Tested against the Docker cluster (`V5_EXEC="docker exec -i slurm-docker-%h-1"`, `V5_SKIP=services` because the
+containers have no systemd): a full launch; a broken node drained while the launch goes on; too few healthy
+nodes stops it; a second launch does not submit the run twice; a finished run is reported, not waited for.
+`probe-store` against an emulator that ignores `If-Match` (moto 5.0.28) fails, as it must.
 
 ## For monitoring and on-call
 
