@@ -102,7 +102,7 @@ def main():
                                   for c in rep.get("checks", [])}}
         steps.append(r)
 
-    # 3. all-reduce across all GPUs; if NCCL peer-to-peer hangs on this host, retry without it
+    # 3. the four collectives across all GPUs; if NCCL peer-to-peer hangs on this host, retry without it
     out = os.path.join(OUT, "allreduce.json")
     cmd = [PY, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={max(ngpu, 1)}",
            "health/allreduce_test.py", "--max-mb", "1024", "--out", out]
@@ -112,8 +112,11 @@ def main():
         r2["note"] = "retried with NCCL_P2P_DISABLE=1"
         r = r2
     ar = load(out) or {}
+    # one entry per collective (all_reduce, reduce_scatter, all_gather, all_to_all): status and busbw by size
     r["result"] = {"status": ar.get("status"), "backend": ar.get("backend"), "ranks": ar.get("ranks"),
-                   "busbw_gbps_by_mb": {s["bytes"] // 2 ** 20: s["busbw_gbps"] for s in ar.get("metrics", {}).get("sizes", [])}}
+                   "ops": {o["op"]: {"status": o["status"], "detail": o["detail"],
+                                     "busbw_gbps_by_mb": {x["bytes"] // 2 ** 20: x["busbw_gbps"] for x in o["metrics"]["sizes"]}}
+                           for o in ar.get("ops", [])}}
     steps.append(r)
 
     # 4. NCCL timeout: a stuck rank must turn into a clean failure (needs 2 GPUs)

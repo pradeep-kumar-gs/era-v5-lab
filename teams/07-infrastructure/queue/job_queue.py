@@ -44,7 +44,7 @@ from common.reasons import (DRAIN, EXIT_CODES, EXIT_DONE, EXIT_FATAL, EXIT_RETRY
 
 # The trainer the wrapper starts. On EC2: Team 05's real trainer. Default: the test trainer in the support kit.
 TRAIN_SCRIPT = os.environ.get("V5_TRAIN_SCRIPT",
-                              os.path.join(HERE, "..", "..", "support", "simulation", "trainer", "train.py"))
+                              os.path.join(HERE, "..", "support", "simulation", "trainer", "train.py"))
 CRASHLOOP_N = int(os.environ.get("CRASHLOOP_N", "3"))
 CRASHLOOP_WINDOW_S = float(os.environ.get("CRASHLOOP_WINDOW_S", "1800"))
 
