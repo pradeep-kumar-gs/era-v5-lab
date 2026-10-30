@@ -13,7 +13,7 @@
   "id": "Q-02",
   "severity": "high",
   "name": "Main run held (exit 78 / crash loop)",
-  "value": 2,
+  "value": 3,
   "unit": "count",
   "action": "Read the job.held cause; rollback or fix, then release.",
   "expected_in_sim": true,
@@ -23,7 +23,7 @@
   "id": "Q-05",
   "severity": "high",
   "name": "Main-run interruptions per day",
-  "value": 859.7126,
+  "value": 895.5766,
   "unit": "count/day",
   "action": "Group incidents by node and cause_class; drain repeat offenders.",
   "expected_in_sim": true,
@@ -33,31 +33,11 @@
   "id": "Q-19",
   "severity": "high",
   "name": "Goodput of the main run",
-  "value": 22.5836,
+  "value": 20.8728,
   "unit": "%",
   "action": "See the largest non-productive bucket in the report.",
   "expected_in_sim": false,
   "fault_rate_driven": true
- },
- {
-  "id": "H-14",
-  "severity": "high",
-  "name": "Step watchdog fired (hang)",
-  "value": 2.1071,
-  "unit": "count/h",
-  "action": "Read the stack dump in the job log and the NCCL flight-recorder trace; drain the rank that stopped.",
-  "expected_in_sim": true,
-  "fault_rate_driven": true
- },
- {
-  "id": "H-15",
-  "severity": "high",
-  "name": "Straggler ratio (rank step time / median)",
-  "value": 1.321,
-  "unit": "ratio",
-  "action": "Medium for 3 windows: drain at the next checkpoint.",
-  "expected_in_sim": false,
-  "fault_rate_driven": false
  },
  {
   "id": "H-21",
@@ -83,7 +63,7 @@
   "id": "C-02",
   "severity": "high",
   "name": "Cost per productive GPU-hour vs list price",
-  "value": 4.428,
+  "value": 4.7909,
   "unit": "ratio",
   "action": "Fix the largest waste bucket (C-03).",
   "expected_in_sim": false,
@@ -93,7 +73,7 @@
   "id": "C-03",
   "severity": "high",
   "name": "Wasted share of main-run spend",
-  "value": 77.4164,
+  "value": 79.1272,
   "unit": "%",
   "action": "The report lists each bucket in USD.",
   "expected_in_sim": false,
@@ -103,10 +83,20 @@
   "id": "C-04",
   "severity": "high",
   "name": "Cost of one incident",
-  "value": 21.4125,
+  "value": 21.41,
   "unit": "x interval cost",
   "action": "Large values: missing emergency save, slow restore, or no spare.",
   "expected_in_sim": true,
+  "fault_rate_driven": false
+ },
+ {
+  "id": "CK-03",
+  "severity": "medium",
+  "name": "Consecutive failed saves",
+  "value": 1,
+  "unit": "count",
+  "action": "Read the failure cause (nvme_full, IntegrityError, upload timeout) and fix it now.",
+  "expected_in_sim": false,
   "fault_rate_driven": false
  },
  {
@@ -140,12 +130,32 @@
   "fault_rate_driven": false
  },
  {
-  "id": "CK-10",
+  "id": "H-14",
+  "severity": "medium",
+  "name": "Step watchdog fired (hang)",
+  "value": 1.964,
+  "unit": "count/h",
+  "action": "Read the stack dump in the job log and the NCCL flight-recorder trace; drain the rank that stopped.",
+  "expected_in_sim": true,
+  "fault_rate_driven": true
+ },
+ {
+  "id": "CK-01",
   "severity": "low",
-  "name": "Save backpressure (previous save still running)",
-  "value": 1,
-  "unit": "count/day",
-  "action": "Increase the interval or upload bandwidth.",
+  "name": "Time since last committed checkpoint",
+  "value": 1.3133,
+  "unit": "x interval",
+  "action": "Check checkpoint.failed events; if saves fail, fix storage before the next failure costs a full interval.",
+  "expected_in_sim": false,
+  "fault_rate_driven": false
+ },
+ {
+  "id": "CK-02",
+  "severity": "low",
+  "name": "Compute dollars at risk (since last commit)",
+  "value": 0.665,
+  "unit": "USD",
+  "action": "Same as CK-01. Thresholds are multiples of the cost of one interval.",
   "expected_in_sim": false,
   "fault_rate_driven": false
  },
@@ -153,7 +163,7 @@
   "id": "CK-14",
   "severity": "low",
   "name": "Work lost per incident",
-  "value": 0.9163,
+  "value": 0.955,
   "unit": "x interval",
   "action": "Check that SIGUSR1/SIGTERM reached the trainer and the emergency save committed.",
   "expected_in_sim": false,
@@ -177,6 +187,16 @@
   "unit": "count",
   "action": "Check the submit system's account mapping.",
   "expected_in_sim": true,
+  "fault_rate_driven": false
+ },
+ {
+  "id": "H-15",
+  "severity": "low",
+  "name": "Straggler ratio (rank step time / median)",
+  "value": 1.0875,
+  "unit": "ratio",
+  "action": "Medium for 3 windows: drain at the next checkpoint.",
+  "expected_in_sim": false,
   "fault_rate_driven": false
  }
 ]

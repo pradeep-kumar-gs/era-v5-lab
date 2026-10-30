@@ -3,7 +3,7 @@
 What we deliver: the infrastructure that runs the V5 main run on **AWS EC2 GPU nodes, scheduled by Slurm**. It
 is designed so that **money already spent on training is never lost**. It comes with LOW / MEDIUM / HIGH
 metrics that tell people what to do. Every decision is explained in simple words. Everything here was proven
-in a Docker copy of the Slurm cluster (31 of 31 drills, run 11 after the week-1 review fixes). That evidence is in the optional
+in a Docker copy of the Slurm cluster (33 of 33 drills, run 14, with checkpoint fencing and the async-save fix). That evidence is in the optional
 [`../support/`](../support/README.md) folder.
 
 > **In simple words.** Training costs money every hour, and at this scale machines break every few hours.

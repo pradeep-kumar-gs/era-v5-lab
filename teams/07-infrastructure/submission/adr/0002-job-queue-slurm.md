@@ -350,7 +350,7 @@ tiny model, checkpoints on the S3 emulator):
 | node loss | 88 s (`SlurmdTimeout` 30 s) | 24 |
 | controller failover | backup in control after 82 s; training never stopped | 0 |
 
-Most of each MTTR is Slurm's requeue wait (`cred_expire=60`, §5; run 11: MTTR 85 s, 31 of 31 drills).
+Most of each MTTR is Slurm's requeue wait (`cred_expire=60`, §5; run 11: MTTR 85 s, 31 of 31 drills; run 14: 33 of 33, adding the split-brain drills).
 The table above is run 9 (`cred_expire=30`); with 60 s each restart is about 30 s longer. Run 3 measured 3–57 s with an
 immediate-restart hack, but run 7 showed that hack can lose the main run, so it was removed. Goodput in the
 simulation is low only because a fault is injected about every minute; ADR 0004 projects the measured
