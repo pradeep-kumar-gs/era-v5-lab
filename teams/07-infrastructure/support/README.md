@@ -8,14 +8,14 @@ test trainer, GPU checks for Kaggle, the cost model, and generated reports.
 |---|---|---|
 | `tests/` | unit tests for checkpoint (T1–T13), queue, health, cost and monitoring, with their fixtures | Docker (or Python with torch) |
 | `simulation/` | the Docker Slurm cluster, the drill script (`run_sim.py`), the test trainer, the architecture team's `config_v0.yaml`, and the latest results; see [simulation/README.md](simulation/README.md) | Docker, ~25 min |
-| `kaggle/` | GPU checks on Kaggle's free 2×T4 (real `nvidia-smi`, NCCL all-reduce and timeout, checkpoint tests on CUDA, save speed); see [kaggle/README.md](kaggle/README.md) | a Kaggle account |
+| `kaggle/` | GPU checks on Kaggle's free 2 GPUs (real `nvidia-smi`, NCCL all-reduce and timeout, checkpoint tests on CUDA, save speed); see [kaggle/README.md](kaggle/README.md) | a Kaggle account |
 | `cost/` | cost model (Young's interval, spot vs on-demand, hot spare), its report, and the "instances outside Slurm" check | Python |
 | `tools/` | `bench_save.py`: the real checkpoint stall on a GPU | a GPU |
 | `docs/` | [review_week1.md](docs/review_week1.md) (results, instructor questions, status), [sim_results.md](docs/sim_results.md), [metrics_catalog.md](docs/metrics_catalog.md), [codes_and_actions.md](docs/codes_and_actions.md), [checkpoint_design.md](docs/checkpoint_design.md), [deepspeed_impact.md](docs/deepspeed_impact.md) (proposal: what changes in each ADR if we train with DeepSpeed) | — |
 
 ## Run the evidence
 
-From `teams/07-infrastructure`, with Docker Desktop running. Nothing needs AWS.
+From `teams/07-infrastructure`, with Docker Desktop running. Nothing needs the cloud.
 
 ```bash
 docker compose -f support/simulation/slurm-docker/docker-compose.yml build slurmdbd   # once, ~5 min
@@ -27,7 +27,7 @@ docker run --rm -v "$PWD":/opt/v5:ro --entrypoint bash v5-slurm-sim:1 \
 # 2. the checkpoint tests against S3 (the moto emulator, the real boto3 code path)
 docker run --rm -v "$PWD":/opt/v5:ro --entrypoint bash v5-slurm-sim:1 -c '
   cd /opt/v5; moto_server -p 9000 >/dev/null 2>&1 & sleep 3
-  export V5_S3_ENDPOINT=http://127.0.0.1:9000 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
+  export V5_S3_ENDPOINT=http://127.0.0.1:9000 V5_S3_ACCESS_KEY=test V5_S3_SECRET_KEY=test
   python -c "import boto3; boto3.client(\"s3\", endpoint_url=\"http://127.0.0.1:9000\").create_bucket(Bucket=\"v5-test\")"
   V5_TEST_REMOTE=s3://v5-test/ckpt python -m pytest -q -p no:cacheprovider -W ignore support/tests/test_ckpt.py'
 
@@ -56,5 +56,5 @@ the code can report a cause that has no plain-words explanation.
 - [ ] Each item in `docs/review_week1.md` is marked fixed / tested / open, with a reason.
 - [ ] Unit tests pass (steps 1–2); the simulation passes if you run it (step 3).
 - [ ] Every HIGH alert and every exit-78 cause says what to do (`metrics/README.md`, `docs/codes_and_actions.md`).
-- [ ] `metrics/prices.yaml` is checked against the AWS pricing page before any dollar figure is used.
+- [ ] `metrics/prices.yaml` is checked against the provider's price list before any dollar figure is used.
 - [ ] Open points in each ADR have an owner and a date.

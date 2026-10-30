@@ -79,7 +79,7 @@ def collectives(tmp_path, ranks, env=None):
 
 
 def test_four_collectives_exact_on_gloo(tmp_path):
-    """All-reduce, reduce-scatter, all-gather and all-to-all (Mallik's set): exact values on 2 and 3 ranks."""
+    """All-reduce, reduce-scatter, all-gather and all-to-all (millermuttu's set): exact values on 2 and 3 ranks."""
     for ranks in (2, 3):
         rc, r = collectives(tmp_path, ranks)
         assert rc == 0 and r["status"] == "pass" and r["backend"] == "gloo" and r["ranks"] == ranks
@@ -108,9 +108,9 @@ def test_xid94_restart_once_drain_on_repeat(tmp_path):
 
 def test_nvlink_inactive_link_fails(tmp_path):
     up, down, none = tmp_path / "up", tmp_path / "down", tmp_path / "none"
-    up.write_text("GPU 0: NVIDIA H100\n\t Link 0: 26.562 GB/s\n\t Link 1: 26.562 GB/s\n")
-    down.write_text("GPU 0: NVIDIA H100\n\t Link 0: 26.562 GB/s\n\t Link 1: <inactive>\n")
-    none.write_text("GPU 0: Tesla T4\n")
+    up.write_text("GPU 0: NVIDIA GPU\n\t Link 0: 26.562 GB/s\n\t Link 1: 26.562 GB/s\n")
+    down.write_text("GPU 0: NVIDIA GPU\n\t Link 0: 26.562 GB/s\n\t Link 1: <inactive>\n")
+    none.write_text("GPU 0: GPU\n")
     assert health_check.nvlink_checks(TH, 8, str(up))[0]["status"] == "pass"
     bad = health_check.nvlink_checks(TH, 8, str(down))[0]
     assert bad["status"] == "fail" and bad["metrics"]["inactive"] == 1

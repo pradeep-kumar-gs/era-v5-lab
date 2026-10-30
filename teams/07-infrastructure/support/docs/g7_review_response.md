@@ -1,7 +1,7 @@
 # Response to the G7 multi-repo review: checkpoint topic
 
 Reply to `G7_ERA_V5_DeepSpeed_ADR_and_Code_Gap_Reports` (sureshmantha/erav5, 29 Oct 2026), for the
-checkpoint rows only. Written by Pradeep (P) for the team.
+checkpoint rows only. Written by pradeep-kumar-gs (P) for the team.
 
 **In simple words.** The review read a copy of this repo from before the DeepSpeed work (its file list has no
 `ckpt/ds_ckpt.py` and no tests after T17). Since then the checkpoint path runs on a real DeepSpeed engine, and
@@ -64,9 +64,9 @@ few healthy nodes and a second launch. See `README.md` "Starting production".
 ## Where the review is right, and what stays open
 
 - **No GPU evidence yet** for the DeepSpeed path. T16 (FSDP2) and T23 (fp16 bit-equal resume) run only on
-  Kaggle 2×T4; that run is pending.
+  Kaggle (2 GPUs); that run is pending.
 - **No real S3 bucket yet.** Every S3 test runs against the moto emulator. To do on the week-2 bucket: the
-  whole suite with `V5_TEST_REMOTE=s3://…`, T26 first (does AWS answer 412 as the emulator does).
+  whole suite with `V5_TEST_REMOTE=s3://…`, T26 first (does the cloud answer 412 as the emulator does).
 - **Simulated numbers are not GPU goodput.** Stall and commit times from the Docker cluster are CPU numbers.
 - **DeepSpeed world-size change** is refused, not done: converting with `ds_to_universal.py` is an operator
   step, not automatic.

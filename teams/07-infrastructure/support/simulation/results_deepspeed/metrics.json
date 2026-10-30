@@ -357,7 +357,7 @@
   "computed": false
  },
  "H-11": {
-  "name": "NVLink / EFA link down",
+  "name": "NVLink / fast network link down",
   "value": null,
   "unit": "count",
   "severity": null,
@@ -497,14 +497,14 @@
   "computed": false
  },
  "C-07": {
-  "name": "Cross-AZ / internet egress",
+  "name": "Cross-zone / internet egress",
   "value": null,
   "unit": "USD/day",
   "severity": null,
   "computed": false
  },
  "C-08": {
-  "name": "Unattached EBS volumes / old snapshots",
+  "name": "Unattached block volumes / old snapshots",
   "value": null,
   "unit": "USD/month",
   "severity": null,

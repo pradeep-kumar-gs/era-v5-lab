@@ -13,8 +13,8 @@
 
 ## Context
 
-- We will run on AWS EC2 GPU instances (proposed `p6-b200.48xlarge`, 8 × B200) through Slurm (ADR 0002).
-- At the assumed on-demand price (`metrics/prices.yaml`, **not yet checked against the AWS pricing page**) one node
+- We will run on cloud GPU nodes (proposed `gpu-node-8`, 8 GPUs) through Slurm (ADR 0002).
+- At the assumed on-demand price (`metrics/prices.yaml`, **not yet checked against the provider's price list**) one node
   costs about **$114/h**, so 2 nodes cost about $5,500 per day and 8 nodes about $22,000 per day.
 - V4 lost money in ways nobody measured: a cluster idle for 3 days, hand-typed restarts, a run continued on a
   silently misloaded checkpoint.
@@ -64,20 +64,20 @@ more than saves**, so the design spends effort on fast, automatic restarts and o
 | Commit only after every file is re-checked; manifest last; `latest.json` moved last | a damaged checkpoint can never waste a restart or, worse, a whole run on a misload |
 | Automatic fallback to the previous commit | no person needed at 4 a.m. to pick a checkpoint |
 | Protected checkpoints, S3 versioning, delete only by the retention role | the money in a checkpoint cannot be deleted by a training bug |
-| Keep 3 recent in S3 Standard, protected ones to Glacier after X days; abort incomplete uploads after 1 day | storage is billed monthly; old and orphan objects are the only storage waste |
-| Same region and AZ for nodes, bucket and eval, S3 gateway endpoint | no data-transfer charges on checkpoint traffic |
+| Keep 3 recent in S3 Standard, protected ones to the archive tier after X days; abort incomplete uploads after 1 day | storage is billed monthly; old and orphan objects are the only storage waste |
+| Same region and zone for nodes, bucket and eval, a private storage endpoint | no data-transfer charges on checkpoint traffic |
 
 ### 3. Purchase options
 
-> **In simple words.** Spot instances are much cheaper per hour, but AWS can take them back with 2 minutes
+> **In simple words.** Spot instances are much cheaper per hour, but the cloud can take them back with 2 minutes
 > notice, and the whole multi-node job stops when any one node goes. On-demand costs more but stays.
 
 | Use | Purchase | Why |
 |---|---|---|
-| Main run | **on-demand, or an EC2 Capacity Block** booked for the run | the model says spot is cheaper per useful hour *if* capacity exists, but whole p6-b200 nodes are rarely available as spot, and a reclaim can leave the run waiting for capacity that never comes. A Capacity Block gives a fixed price and guaranteed nodes for the booked window |
+| Main run | **on-demand, or a reserved capacity booking** booked for the run | the model says spot is cheaper per useful hour *if* capacity exists, but whole 8-GPU nodes are rarely available as spot, and a reclaim can leave the run waiting for capacity that never comes. A reserved capacity booking gives a fixed price and guaranteed nodes for the booked window |
 | Hot spare | on-demand, **running preemptible team jobs** | the model shows the spare's saved restart time (≈ 15 min per failure) does not pay for its price at S15 failure rates; its value is that the run never waits for capacity. Letting it run team work recovers most of its cost |
 | Team ladder runs, benchmarks | spot where available, else on-demand in `teams` | they save on SIGTERM (ADR 0002) and lose only seconds when reclaimed |
-| Eval, quantization | smaller, cheaper GPU nodes (g6e, `eval` partition) | never the training node; a fraction of the price |
+| Eval, quantization | smaller, cheaper GPU nodes (`eval` partition) | never the training node; a fraction of the price |
 | CPU jobs (data, retention, export) | small on-demand or spot CPU instances | no GPU needed |
 | Idle nodes | stopped by Slurm power saving after 10 min (`SuspendTime=600`), one spare kept up | an idle GPU node costs the full price for nothing |
 
@@ -103,7 +103,7 @@ cost 9), each with its unit, direction, LOW / MEDIUM / HIGH thresholds, a plain-
 action, and the owner. [metrics_catalog.md](../support/docs/metrics_catalog.md) is generated from it
 (`python metrics/evaluate.py --render-md support/docs/metrics_catalog.md`), so the two never disagree.
 `metrics/evaluate.py` computes every metric it can from the events and checks the thresholds; 41 metrics are
-computable from the Docker simulation, and the rest need real GPUs or the AWS account (marked `sim: false`).
+computable from the Docker simulation, and the rest need real GPUs or the cloud account (marked `sim: false`).
 
 HIGH alerts, all areas:
 
@@ -111,7 +111,7 @@ HIGH alerts, all areas:
 |---|---|
 | Checkpoint | CK-01/02 time or dollars at risk ≥ 2 intervals · CK-03 2 failed saves in a row · CK-04 checksum mismatch · CK-05 restore check failure · CK-06 strict-load / environment refusal · CK-07 NaN guard · CK-08 stall ≥ 5% · CK-09 commit latency ≥ 20 min · CK-12 NVMe headroom ≤ 1.2 · CK-13 restore ≥ 30 min · CK-14 lost work ≥ 2 intervals · CK-15 protected checkpoint missing |
 | Queue | Q-01 main run pending ≥ 10 min · Q-02 main run held · Q-03 reschedule ≥ 10 min · Q-05 ≥ 10 interruptions/day · Q-06 idle GPU ≥ 4 node-h/day · Q-07 allocated but not stepping ≥ 15 min · Q-09 drained ≥ 3 · Q-10 node replacement ≥ 15 min · Q-11 slurmctld down · Q-15 budget ≥ 90% · Q-17 clock offset ≥ 500 ms · Q-19 goodput ≤ 80% · Q-20 MTTR ≥ 60 min |
-| Health | H-01 fatal Xid · H-03 ECC uncorrectable · H-06 row remap failure · H-07 GPU missing · H-08 at slowdown temperature · H-11 NVLink/EFA down · H-12 busbw ≤ 0.7× · H-13 wrong all-reduce · H-14 watchdog ≥ 2/h · H-15 straggler ≥ 1.25 · H-16 NCCL timeouts ≥ 2/h · H-21 spot notice · H-22 DCGM fail · H-23 host memory ≤ need · H-24 loss-spike guard |
+| Health | H-01 fatal Xid · H-03 ECC uncorrectable · H-06 row remap failure · H-07 GPU missing · H-08 at slowdown temperature · H-11 NVLink / fast network down · H-12 busbw ≤ 0.7× · H-13 wrong all-reduce · H-14 watchdog ≥ 2/h · H-15 straggler ≥ 1.25 · H-16 NCCL timeouts ≥ 2/h · H-21 spot notice · H-22 DCGM fail · H-23 host memory ≤ need · H-24 loss-spike guard |
 | Cost | C-01 burn ≥ 1.25 × plan · C-02 cost per useful GPU-hour ≥ 1.25 × list · C-03 waste ≥ 20% · C-04 one incident ≥ 3 intervals of cost · C-05 instance running outside Slurm · C-06 budget days ≤ 0.8 × training days left |
 
 ### 6. Live alerting and cost tracking (added after the week-1 review)
@@ -127,13 +127,13 @@ HIGH alerts, all areas:
   counts as "per day"). In the simulation report, alerts caused by the injected fault rate are marked
   "fault rate", and alerts a drill causes on purpose are marked "yes".
 - **Cost tags** on every instance: `v5:cluster`, `v5:role` (gpu / eval / cpu / head), `v5:team` (Slurm account or
-  `shared`), `v5:run`. They are activated as **cost allocation tags**, so the AWS bill and **AWS Budgets** split by
+  `shared`), `v5:run`. They are activated as **cost allocation tags**, so the cloud bill and **the cloud's budget alerts** split by
   team, with alerts at 50 / 75 / 90% (same as the Slurm `GrpTRESMins` budgets, which now count GPU-minutes via
   `AccountingStorageTRES=gres/gpu`).
-- **Instances outside Slurm** (C-05): `support/cost/find_unmanaged.py` compares running EC2 instances with Slurm's node
+- **Instances outside Slurm** (C-05): `support/cost/find_unmanaged.py` compares running cloud instances with Slurm's node
   list. A running instance Slurm does not know, or one Slurm thinks is powered down, is HIGH, with its dollars per
   day; an instance missing a cost tag is reported. Tested on fixtures (`support/tests/test_cost.py`); runs against the
-  AWS API once we have the account.
+  the cloud API once we have the account.
 
 ### 7. Simulation findings that changed the design
 
@@ -156,11 +156,11 @@ Good:
 
 Bad and accepted:
 
-- **Prices are assumptions** until `metrics/prices.yaml` is checked against the AWS pricing page (`checked: null`).
+- **Prices are assumptions** until `metrics/prices.yaml` is checked against the provider's price list (`checked: null`).
   The decisions depend on ratios more than on exact prices, but the dollar figures do not.
 - The failure rate (MTBF) is a prior from published runs until our own incident records replace it after the dry runs.
-- 33 of the 74 metrics cannot be tested until we have GPUs and the AWS account.
-- A Capacity Block must be booked ahead and is paid whether or not we use it, so the run plan must be ready in time.
+- 33 of the 74 metrics cannot be tested until we have GPUs and the cloud account.
+- A reserved capacity booking must be booked ahead and is paid whether or not we use it, so the run plan must be ready in time.
 
 ## Validation
 
@@ -173,6 +173,6 @@ Bad and accepted:
 
 ## Open points
 
-- Real prices for our region and date; Capacity Block availability and price for p6-b200.
+- Real prices for our region and date; reserved capacity booking availability and price for the GPU node.
 - The lab's total GPU budget and the capacity calendar (needed for C-01 and C-06).
 - Who receives HIGH pages (on-call rota) and through which channel (Team 08).

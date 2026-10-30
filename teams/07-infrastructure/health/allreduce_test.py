@@ -11,7 +11,7 @@ whole training run (and every slow minute is paid for), so it fails the check.
 
 Every value is a small whole number, exact in fp32 in any reduction order, so a wrong value is a fault, not
 rounding. Bus bandwidth follows the nccl-tests convention. The four collectives and their checks come from
-Mallik's `health/allreduce.py` (team 07); here they share one JSON report with the rest of the health check.
+millermuttu's `health/allreduce.py` (team 07); here they share one JSON report with the rest of the health check.
 
 Run:  torchrun --nproc_per_node=<gpus> health/allreduce_test.py [--max-mb 1024] [--ops all_reduce,all_to_all]
       without GPUs it uses gloo on CPU and says so (backend: gloo); bandwidth then means nothing.

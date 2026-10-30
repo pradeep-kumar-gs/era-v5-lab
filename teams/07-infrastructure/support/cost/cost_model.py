@@ -68,7 +68,7 @@ def scenario(p, params, nodes, mtbf_gph, mttr_s, price_key="on_demand", interval
     good = max(0.0, 1 - w)
     s3 = p["s3"]
     storage_month = size / 1e9 * (p["checkpoint"]["keep_remote"] * s3["standard"]
-                                  + p["checkpoint"]["protected_per_month"] * s3["glacier_flexible"])
+                                  + p["checkpoint"]["protected_per_month"] * s3["archive"])
     return {"params_b": params / 1e9, "nodes": nodes, "gpus": gpus, "price_usd_h": round(price_h, 2),
             "ckpt_gb": round(size / 1e9, 1), "stall_s": round(stall, 2), "upload_s": round(upload, 1),
             "mtbf_h": round(mtbf_s / 3600, 1), "mttr_s": round(mttr, 1), "interval_min": round(T / 60, 1),
@@ -149,8 +149,8 @@ def main():
                          "cheaper": "spot" if sp["usd_per_productive_h"] < od["usd_per_productive_h"] else "on-demand"})
     lines += [table(rows, list(rows[0])), "",
               "Spot looks cheaper per useful hour in these rows, but only if spot capacity for whole "
-              "p6-b200 nodes can actually be obtained, and every reclaim adds a restart that a person may have to "
-              "watch. Decision (ADR 0004): **main run on on-demand or a Capacity Block**; spot only for "
+              "gpu-node-8 nodes can actually be obtained, and every reclaim adds a restart that a person may have to "
+              "watch. Decision (ADR 0004): **main run on on-demand or a reserved capacity booking**; spot only for "
               "preemptible team jobs (ladder, evals), which already save on SIGTERM.", ""]
 
     lines += ["## Hot spare node", "",

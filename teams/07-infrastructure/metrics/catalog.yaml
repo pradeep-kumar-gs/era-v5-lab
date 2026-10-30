@@ -7,7 +7,7 @@
 #   medium : act TODAY, within 4 working hours. Things still run, but cost grows if nobody acts.
 #   low    : look at it in the weekly ops review. A trend or a small inefficiency.
 # direction: "above" alerts when value >= threshold, "below" when value <= threshold.
-# sim: true when evaluate.py computes it in the Docker test; false needs real GPUs or AWS.
+# sim: true when evaluate.py computes it in the Docker test; false needs real GPUs or the cloud.
 
 severity:
   high:   {response: "page now, 24x7, ack <= 15 min", who: "Team 07 on-call (Team 08 delivers the page)"}
@@ -75,7 +75,7 @@ metrics:
 - {id: CK-15, area: checkpoint, name: Protected checkpoint missing or deleted, unit: count, direction: above,
    low: null, medium: null, high: 1, sim: true, owner: "07",
    why: "Protected checkpoints (every N-th, final, pinned) are the money we can never re-buy.",
-   action: "Restore from S3 versioning; check the retention job's IAM role."}
+   action: "Restore from S3 versioning; check the retention job's cloud role."}
 - {id: CK-16, area: checkpoint, name: Orphan uncommitted objects in S3, unit: GB, direction: above,
    low: 1, medium: 100, high: null, sim: true, owner: "07",
    why: "Half-uploaded checkpoints are never used but are billed every month.",
@@ -83,7 +83,7 @@ metrics:
 - {id: CK-17, area: checkpoint, name: Checkpoint storage cost per day vs plan, unit: ratio, direction: above,
    low: 1.0, medium: 1.5, high: null, sim: false, owner: "07",
    why: "S3 cost grows with every kept checkpoint.",
-   action: "Move protected checkpoints older than X days to Glacier; check keep counts."}
+   action: "Move protected checkpoints older than X days to the archive tier; check keep counts."}
 - {id: CK-18, area: checkpoint, name: Export parity failures (safetensors), unit: count, direction: above,
    low: null, medium: 1, high: null, sim: true, owner: "07",
    why: "Teams 09/11/12 would evaluate or ship weights that are not the trained ones.",
@@ -165,7 +165,7 @@ metrics:
 - {id: Q-17, area: queue, name: Clock offset between nodes, unit: ms, direction: above,
    low: 50, medium: 100, high: 500, sim: false, owner: "07",
    why: "Wrong clocks break event ordering, MTTR numbers and incident timelines.",
-   action: "Restart chrony; check the Amazon Time Sync endpoint."}
+   action: "Restart chrony; check the cloud's time service."}
 - {id: Q-18, area: queue, name: Container image pull time, unit: s, direction: above,
    low: 300, medium: 900, high: null, sim: false, owner: "07",
    why: "A slow first pull adds to every restart on a new node.",
@@ -215,7 +215,7 @@ metrics:
 - {id: H-08, area: health, name: GPU temperature vs slowdown limit, unit: C below limit, direction: below,
    low: 10, medium: 5, high: 0, sim: false, owner: "07",
    why: "A hot GPU slows down and then the whole job runs at its speed.",
-   action: "Check the instance; AWS ticket for cooling."}
+   action: "Check the instance; provider support ticket for cooling."}
 - {id: H-09, area: health, name: Hardware slowdown / power brake active, unit: count, direction: above,
    low: null, medium: 1, high: null, sim: false, owner: "07",
    why: "One throttled GPU slows every GPU in the job.",
@@ -224,7 +224,7 @@ metrics:
    low: null, medium: 1, high: null, sim: false, owner: "07",
    why: "Slow host-GPU copies: slower checkpoints and data loading.",
    action: "Reboot; replace if it persists."}
-- {id: H-11, area: health, name: NVLink / EFA link down, unit: count, direction: above,
+- {id: H-11, area: health, name: NVLink / fast network link down, unit: count, direction: above,
    low: null, medium: null, high: 1, sim: false, owner: "07",
    why: "Collectives fall back to slow paths or fail.",
    action: "Drain now."}
@@ -306,11 +306,11 @@ metrics:
    low: 1.2, medium: 1.0, high: 0.8, sim: false, owner: "lead",
    why: "Below 1.0 the money runs out before training finishes.",
    action: "Cut team allocations or the run length; decide early."}
-- {id: C-07, area: cost, name: Cross-AZ / internet egress, unit: USD/day, direction: above,
+- {id: C-07, area: cost, name: Cross-zone / internet egress, unit: USD/day, direction: above,
    low: 1, medium: 20, high: null, sim: false, owner: "07",
    why: "Data transfer out of the region or across AZs is billed per GB; it should be near 0.",
-   action: "Keep nodes, bucket and eval in one region and AZ; use S3 gateway endpoints."}
-- {id: C-08, area: cost, name: Unattached EBS volumes / old snapshots, unit: USD/month, direction: above,
+   action: "Keep nodes, bucket and eval in one region and zone; use a private storage endpoint."}
+- {id: C-08, area: cost, name: Unattached block volumes / old snapshots, unit: USD/month, direction: above,
    low: 10, medium: 100, high: null, sim: false, owner: "07",
    why: "Storage left behind keeps billing.",
    action: "Delete or snapshot-and-delete."}

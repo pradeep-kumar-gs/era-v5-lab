@@ -13,6 +13,32 @@ All 74 metrics: [metrics_catalog.md](../support/docs/metrics_catalog.md). Every 
 
 ---
 
+## How it works, step by step
+
+Plain-words overview and the reasons behind each choice: [team briefing §3.5](../TEAM_BRIEFING.md#35-monitoring-cost-and-alerts-adr-0004).
+
+```text
+1. every part writes events      common/events.py emit(): one JSON line per event (UTC time, host, run, job)
+                                 into /var/log/v5/events on its node; Team 08's agent ships them to the shared store
+                                 (checkpoint.*, restore.*, job.*, health.*, node.*, train.*, cost.*)
+2. live: metrics/watch.py        every 30 s: read the events → compute the 74 metrics in metrics/catalog.yaml →
+   (v5-watch.service)            compare with LOW / MEDIUM / HIGH thresholds → a new or worse level writes
+                                 alert.fired and posts to V5_ALERT_WEBHOOK (the pager / chat)
+3. people: metrics/explain.py    any code, cause, alert id or Slurm reason → what happened · already done · what
+                                 you do (all texts in common/reasons.py and catalog.yaml, one place)
+4. after a run or a drill:       metrics/evaluate.py → metrics.json, alerts.json, report.md: goodput, time to
+                                 recover per fault, lost steps, cost of the incidents
+```
+
+| Severity | Means | Who, how fast |
+|---|---|---|
+| HIGH | the system stopped on purpose, or money is burning | page now |
+| MEDIUM | degraded, not stopped | today |
+| LOW | trend to watch | weekly review |
+
+---
+
+
 ## 1. The 30-second version
 
 | You see | It means | You do |
@@ -73,7 +99,7 @@ The events you will use most:
 | `train.step` | `step`, `loss`, `step_s` | training is moving |
 | `train.watchdog`, `train.loss_spike`, `train.nonfinite` | `step` | a hang / divergence / NaN |
 | `node.drained` | `node`, `reason` | a node was taken out |
-| `node.spot_notice` | `node` | AWS takes the instance back in 2 min |
+| `node.spot_notice` | `node` | the cloud takes the instance back in 2 min |
 | `health.report` | `verdict`, `failed`, `warned`, `skipped_required` | node health |
 | `alert.fired` | `id`, `severity`, `value`, `why`, `action`, `respond`, `who`, `page` | an alert |
 
@@ -234,8 +260,8 @@ nodes). The JSON report says which check; `explain.py <check name>` says what to
 | H-03 | ECC uncorrectable | any | drained; if the loss looks wrong, roll back to before the first error |
 | H-06 | row-remap failure | any | replace |
 | H-07 | GPU missing | any | reboot or replace |
-| H-08 | at slowdown temperature | 0 °C margin | AWS ticket for cooling |
-| H-11 | NVLink / EFA link down | any | drain now |
+| H-08 | at slowdown temperature | 0 °C margin | provider support ticket for cooling |
+| H-11 | NVLink / fast network link down | any | drain now |
 | H-12 | all-reduce bandwidth | ≤ 0.7 × baseline | find the slow NIC or GPU |
 | H-13 | all-reduce wrong sum | any | drain; suspect silent data corruption |
 | H-14 | watchdog (hang) | ≥ 2 per hour | read the stack dump and flight-recorder trace; drain the rank that stopped |
@@ -306,8 +332,8 @@ Training still runs, but the last commit is getting old (CK-01 will follow). `ch
 In `support/`: `tests/test_monitoring.py` fails if the code can report something that has no explanation.
 
 From `teams/07-infrastructure/`. Events are written on each node's own disk (`/var/log/v5/events`) and the log agent ships
-them to `s3://<bucket>/events/`; `watch.py` reads a folder, so on EC2 point it at a synced copy
-(`aws s3 sync s3://<bucket>/events /var/lib/v5-watch/events`). In Docker the folder is the shared `/s3/events`.
+them to `s3://<bucket>/events/`; `watch.py` reads a folder, so on cloud nodes point it at a synced copy
+(an `s3 sync` of `s3://<bucket>/events` to `/var/lib/v5-watch/events`). In Docker the folder is the shared `/s3/events`.
 
 ```bash
 python metrics/watch.py --events /s3/events --run v5main --nodes 2 --interval-s 1800 --every 30
@@ -326,4 +352,4 @@ python metrics/explain.py --all ../support/docs/codes_and_actions.md        # af
 
 - The on-call rota and the alert channel (lead + Team 08).
 - Real thresholds for GPU metrics after the week-2 baseline.
-- Which metrics Team 08 stores long-term, and for how long (proposal: events 90 days, then Glacier).
+- Which metrics Team 08 stores long-term, and for how long (proposal: events 90 days, then the archive tier).

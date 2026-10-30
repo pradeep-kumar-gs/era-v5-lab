@@ -136,7 +136,7 @@ def remap_checks(th, expect) -> list:
 
 
 def nvlink_checks(th, expect, fixture=None) -> list:
-    """Inactive NVLink links (Mallik's check, team 07). A down link does not raise an error: all-reduce just
+    """Inactive NVLink links (millermuttu's check, team 07). A down link does not raise an error: all-reduce just
     runs at half speed for the whole run. Without DCGM nothing else would see it."""
     if expect == 0 and fixture is None:
         return []

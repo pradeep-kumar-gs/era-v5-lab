@@ -1,4 +1,4 @@
-# drill health_fakes (2026-10-30 14:19:10 IST)
+# drill health_fakes (2026-10-30 20:50:15 IST)
 
 ## results
 PASS {"drill": "health_gpu_checks_run", "pass": true, "nodes": {"c1": ["pass", "pass", "pass", "pass"], "c2": ["pass", "pass", "pass", "pass"], "c3": ["pass", "pass", "pass", "pass"]}}
@@ -10,7 +10,7 @@ $ [c1] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 0
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:49.294Z",
+   "time": "2026-10-30T15:19:53.997Z",
    "host": "c1",
    "mode": "periodic",
    "checks": [
@@ -58,7 +58,7 @@ $ [c2] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 0
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:49.506Z",
+   "time": "2026-10-30T15:19:54.213Z",
    "host": "c2",
    "mode": "periodic",
    "checks": [
@@ -106,7 +106,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 0
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:49.730Z",
+   "time": "2026-10-30T15:19:54.449Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -156,7 +156,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 4
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:50.074Z",
+   "time": "2026-10-30T15:19:54.789Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -208,7 +208,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 4
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:50.508Z",
+   "time": "2026-10-30T15:19:55.233Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -221,7 +221,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "count": 2
      },
      "gpu": null,
-     "seconds": 0.014
+     "seconds": 0.012
     },
     {
      "name": "gpu_temperature",
@@ -232,7 +232,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "temp_c": 40.0
      },
      "gpu": 0,
-     "seconds": 0.014
+     "seconds": 0.012
     },
     {
      "name": "ecc_uncorrectable",
@@ -244,7 +244,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "correctable": 0.0
      },
      "gpu": 0,
-     "seconds": 0.014
+     "seconds": 0.012
     },
     {
      "name": "pcie_link",
@@ -260,7 +260,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 4
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:50.935Z",
+   "time": "2026-10-30T15:19:55.669Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -314,7 +314,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 4
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:51.357Z",
+   "time": "2026-10-30T15:19:56.122Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -327,7 +327,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "count": 2
      },
      "gpu": null,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "gpu_temperature",
@@ -338,7 +338,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "temp_c": 40.0
      },
      "gpu": 0,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "ecc_uncorrectable",
@@ -350,7 +350,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "correctable": 0.0
      },
      "gpu": 0,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "pcie_link",
@@ -366,7 +366,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 4
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:51.778Z",
+   "time": "2026-10-30T15:19:56.563Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -418,7 +418,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
   exit 3
   {
    "schema": "v5-health/1",
-   "time": "2026-10-30T08:48:52.200Z",
+   "time": "2026-10-30T15:19:57.005Z",
    "host": "c3",
    "mode": "periodic",
    "checks": [
@@ -431,7 +431,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "count": 2
      },
      "gpu": null,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "gpu_temperature",
@@ -442,7 +442,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "temp_c": 40.0
      },
      "gpu": 0,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "ecc_uncorrectable",
@@ -454,7 +454,7 @@ $ [c3] . /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill /opt/venv/bin/python /o
       "correctable": 0.0
      },
      "gpu": 0,
-     "seconds": 0.012
+     "seconds": 0.013
     },
     {
      "name": "pcie_link",
@@ -468,7 +468,7 @@ $ [slurmctld] scontrol update nodename=c3 state=resume 2>/dev/null; true
   exit 0
 $ [slurmctld] RUN_ID=v5main V5_EVENTS_DIR=/s3/events /opt/venv/bin/python -c "import sys,json; sys.path.insert(0,'/opt/v5'); from common.events import emit; print(emit('drill.injected', **json.loads(sys.argv[1]))['time'])" '{"drill": "nvlink_down", "target": "c3", "cause_class": "gpu"}'
   exit 0
-  2026-10-30T08:48:52.560Z
+  2026-10-30T15:19:57.401Z
 $ [c3] printf 'GPU 0: Fake\n\t Link 0: <inactive>\n' > /run/fake/nvlink
   exit 0
 $ [c3] rm -f /run/fake/*
@@ -477,4 +477,4 @@ $ [slurmctld] scontrol update nodename=c3 state=resume
   exit 0
 $ [slurmctld] RUN_ID=v5main V5_EVENTS_DIR=/s3/events /opt/venv/bin/python -c "import sys,json; sys.path.insert(0,'/opt/v5'); from common.events import emit; print(emit('node.resumed', **json.loads(sys.argv[1]))['time'])" '{"node": "c3", "by": "drill"}'
   exit 0
-  2026-10-30T08:49:10.614Z
+  2026-10-30T15:20:15.508Z
