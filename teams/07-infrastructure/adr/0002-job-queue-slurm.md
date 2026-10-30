@@ -393,7 +393,7 @@ tiny model, checkpoints on the S3 emulator):
 
 Most of each MTTR is Slurm's requeue wait (`cred_expire=60`, §5; run 11: MTTR 85 s, 31 of 31 drills; run 14: 33 of 33, adding the split-brain drills).
 
-**Latest: run 17 (2026-10-30): 44 of 44 drills pass in 33 minutes**, adding the limit, health-fake and time-limit
+**Latest: run 19 (2026-10-30, flattened folder layout): 44 of 44 drills pass in 33 minutes** (run 17: the same on the old layout), adding the limit, health-fake and time-limit
 drills of the merge with Mallik's and Max's work; smoke run 13 of 13 in 193 s. Runs 15 and 16 found three
 problems the merge itself had introduced, all fixed above: `mainrun` no longer preempting (QOS order), jobs without
 `--time` pending forever (default times), and budgets that overspend by one job (`safe`).

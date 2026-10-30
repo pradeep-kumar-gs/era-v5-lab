@@ -3,7 +3,7 @@
 What we deliver: the infrastructure that runs the V5 main run on **GPU nodes scheduled by Slurm** (the TSAI
 shared GPU node, or a self-managed EC2 fleet). It is designed so that **money already spent on training is never
 lost**. It comes with LOW / MEDIUM / HIGH metrics that tell people what to do. Every decision is explained in
-simple words. Everything here was proven in a Docker copy of the Slurm cluster (**44 of 44 drills**, run 17); that
+simple words. Everything here was proven in a Docker copy of the Slurm cluster (**44 of 44 drills**, run 19, on this folder layout); that
 evidence is in the optional [`support/`](support/README.md) folder.
 
 > **In simple words.** Training costs money every hour, and at this scale machines break every few hours.

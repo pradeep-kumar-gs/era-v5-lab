@@ -1,5 +1,5 @@
 {
- "duration_s": 193,
+ "duration_s": 196,
  "passed": 13,
  "total": 13,
  "drills": [
@@ -146,7 +146,7 @@
    "pass": true,
    "node": "c1",
    "restored_step": 131,
-   "lost_steps": 0
+   "lost_steps": 9
   }
  ]
 }
