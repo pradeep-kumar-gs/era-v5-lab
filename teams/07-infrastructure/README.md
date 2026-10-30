@@ -111,6 +111,13 @@ python metrics/explain.py 78           # or 137, loss_spike, CK-05, v5:xid, JobH
 
 Full guide: [USER_GUIDE.md §5](USER_GUIDE.md#5-on-call-what-to-do-when) and [metrics/README.md](metrics/README.md).
 
+## Lab rules for this folder
+
+Put your work in a **topic folder**: `teams/07-infrastructure/<topic>/<file>`, for example
+`teams/07-infrastructure/harness/run.py`. Team documents named in the week plan (for example `benchmarks_v1.md`)
+may sit directly in the team folder. The team lead decides the topic names. Do not make personal folders. Do not
+make new folders under `teams/`. Open a pull request; the lead reviews and merges it. The pr-guard check must pass.
+
 ## Paths in this folder
 
 Commands in these READMEs run from `teams/07-infrastructure/` (for example `python ckpt/ckpt.py list`). On the
