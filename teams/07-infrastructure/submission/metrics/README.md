@@ -165,12 +165,13 @@ python metrics/explain.py v5:ecc_uncorrectable,xid
 
 | Reason | You do |
 |---|---|
-| `xid`, `ecc_uncorrectable`, `remapped_rows` (failure), `dcgm_diag`, `gpu` | replace the instance (stop/start moves it to new hardware); open a hardware ticket |
+| `xid` (fatal code, or Xid 94 twice in 24 h on one GPU), `ecc_uncorrectable`, `remapped_rows` (failure), `dcgm_diag`, `gpu` | replace the instance (stop/start moves it to new hardware); open a hardware ticket |
 | `gpu_count` | reboot; replace if still missing |
 | `gpu_temperature` | check cooling; replace if repeated |
 | `nvme_free` | clean `/nvme` |
 | `clock_offset` | fix chrony |
-| `nccl_allreduce` | `health_check.py --mode full` on it; replace if it fails again |
+| `nccl_<op>` (all_reduce, reduce_scatter, all_gather, all_to_all), `nccl_collectives` | `health_check.py --mode full` on it; replace if it fails again |
+| `nvlink` | reset the GPUs or reboot; replace if the link stays down |
 | `spot_notice` | nothing: the instance goes away |
 | `drill_force_fail` | test only: remove `/var/lib/v5-health/force_fail` |
 

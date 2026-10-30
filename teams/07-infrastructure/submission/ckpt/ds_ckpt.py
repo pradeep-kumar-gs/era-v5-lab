@@ -28,7 +28,8 @@ import torch.distributed as dist
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from ckpt.ckpt import (MANIFEST, SCHEMA, Checkpointer, IntegrityError, NonFiniteError, ReshardError,  # noqa: E402
-                       RestoreCheckError, StrictLoadError, EnvMismatchError, ENV_MUST_MATCH, _fingerprint_piece,
+                       RestoreCheckError, StrictLoadError, EnvMismatchError, ENV_MUST_MATCH, _fingerprint_piece, env_diff,
+                       load_loader_state,
                        all_finite, all_true, barrier, broadcast_obj, device_class, env_manifest,
                        fingerprints, float_bits, local_rank, rank, rng_capture, rng_restore, tensor_items, world)
 from common.events import Timer, emit  # noqa: E402
@@ -151,6 +152,7 @@ class DSCheckpointer(Checkpointer):
             return False
 
         frozen = model_fingerprints(pieces, {f"model.{k}" for k in self.frozen_keys})
+        self.check_frozen({k[len("model."):]: v for k, v in frozen.items()}, step)
         probe = float_bits(probe_fn(model))
         ld = loader.state_dict()
         loader_global = all_true(json.dumps(ld, sort_keys=True) == broadcast_obj(json.dumps(ld, sort_keys=True)))
@@ -226,7 +228,7 @@ class DSCheckpointer(Checkpointer):
         # 3. Environment, now including the DeepSpeed version and config.
         now = dict(env_manifest(self.config_path), **ds_env(model))
         keys = tuple(ENV_MUST_MATCH) + ("deepspeed", "ds_config_sha256", "zero_stage")
-        diff = {k: [man["env"].get(k), now.get(k)] for k in keys if man["env"].get(k) != now.get(k)}
+        diff = env_diff(man["env"], now, keys)
         if diff and not allow_env_change:
             raise EnvMismatchError(f"environment differs from the checkpoint: {diff}")
 
@@ -266,7 +268,7 @@ class DSCheckpointer(Checkpointer):
             raise IntegrityError(f"step {c['step']}: DeepSpeed load_checkpoint could not load ({why or 'on another rank'})")
         with open(os.path.join(local_dir, f"extra_rank{rank()}.json")) as f:
             extra = json.load(f)
-        loader.load_state_dict(extra["loader"])
+        load_loader_state(loader, extra["loader"])
         rng_restore(extra["rng"])
         load_s = tl.s()
 
@@ -292,6 +294,7 @@ class DSCheckpointer(Checkpointer):
             raise RestoreCheckError(f"step {c['step']}: " + "; ".join(problems or ["check failed on another rank"]))
         checks_s = tc.s()
 
+        self._frozen_ref = dict(man["frozen"])
         if skip:
             loader.add_skip(skip)
         return {"step": man["step"], "tokens": man["tokens"], "branch": c["branch"], "from_path": rel,

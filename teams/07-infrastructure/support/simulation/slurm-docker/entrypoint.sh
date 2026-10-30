@@ -26,7 +26,17 @@ runuser -u munge -- /usr/sbin/munged --force
 # shared volume, which plays the part of that shipped copy, so the drills can read every node's events.
 ln -sfn /s3 /var/log/v5
 mkdir -p /etc/v5
-printf '%s\n' "export V5_EVENTS_DIR=/s3/events" "export V5_EXPECT_GPUS=0" \
+# GPU nodes (2 placeholder GPUs each) get the fake nvidia-smi and expect 2 GPUs, so the real GPU checks run;
+# every node gets the fake dmesg (a container cannot read the kernel log).
+gpus=0
+case "$(hostname)" in c[1-3]) gpus=2
+  install -m 755 /opt/v5/support/simulation/slurm-docker/fake-nvidia-smi /usr/local/bin/nvidia-smi ;; esac
+install -m 755 /opt/v5/support/simulation/slurm-docker/fake-dmesg /usr/local/bin/dmesg
+mkdir -p /run/fake
+# Test users for the limit drills (fixed UIDs, the same in every container): alice is in arch, bob in perf,
+# carol has no Slurm account (ideas from Mallik's and Max's tests, team 07).
+for u in alice:2101 bob:2102 carol:2103; do id "${u%%:*}" >/dev/null 2>&1 || useradd -m -u "${u##*:}" "${u%%:*}"; done
+printf '%s\n' "export V5_EVENTS_DIR=/s3/events" "export V5_EXPECT_GPUS=$gpus" "export V5_COLL_MAX_MB=16" \
   "export V5_NVME_MIN_FREE_GB=1" "export V5_MEM_MIN_GB=0.2" "export V5_DEVICE=cpu" \
   "export V5_S3_ENDPOINT=http://s3emu:9000" "export AWS_ACCESS_KEY_ID=test" "export AWS_SECRET_ACCESS_KEY=test" \
   "export AWS_REGION=us-east-1" "export V5_REMOTE_ROOT=s3://v5-ckpt/ckpt" > /etc/v5/node.env

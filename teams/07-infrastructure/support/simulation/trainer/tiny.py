@@ -56,6 +56,9 @@ class SyntheticLoader:
         self.seed, self.global_batch, self.rank, self.world = seed, global_batch, rank, world
         self.position = 0
         self.skip = set()
+        # Which data this is: the real loader hashes its shard list; ours is generated from the seed. A state
+        # saved on other data must be refused, not resumed (Mallik's manifest field, team 07).
+        self.manifest = hashlib.sha256(f"synthetic:{seed}:{VOCAB}:{SEQ}".encode()).hexdigest()
 
     def _global(self, p: int) -> torch.Tensor:
         g = torch.Generator().manual_seed(self.seed * 1_000_003 + p)
@@ -84,9 +87,11 @@ class SyntheticLoader:
             p += 1
 
     def state_dict(self) -> dict:
-        return {"position": self.position, "skip": sorted(self.skip)}
+        return {"position": self.position, "skip": sorted(self.skip), "manifest": self.manifest}
 
     def load_state_dict(self, d: dict):
+        if d.get("manifest", self.manifest) != self.manifest:
+            raise ValueError(f"saved on data manifest {d['manifest'][:12]}, this loader reads {self.manifest[:12]}")
         self.position = d["position"]
         self.skip = set(d["skip"])
 

@@ -129,13 +129,15 @@ S3 is reached through a **gateway VPC endpoint** (no NAT data charges, no intern
 ### 4. Accounts, QOS and budgets (`slurmdbd`, `slurm/setup_accounts.sh`)
 
 > **In simple words.** Every job is charged to an account. The main run's account outranks everyone and may
-> take nodes from team jobs. Teams share the rest fairly, none can grab more than 2 nodes, and each has a
-> GPU-hour budget that Slurm enforces.
+> take nodes from team jobs. Teams share the rest fairly, none can grab more than its GPU share, each job has a
+> time limit (longer work requeues itself), and each team has a GPU-hour budget that Slurm enforces.
 
 ```text
 root
 ├── mainrun            QOS=mainrun   (Priority 1000, Preempt=normal, no walltime cap)
-└── teams              QOS=normal    (Priority 10, GraceTime=60 s, PreemptMode=REQUEUE)
+└── teams              QOS=normal    (Priority 10, GraceTime=60 s, PreemptMode=REQUEUE, MaxWall 24 h,
+    │                                  MaxTRESPerJob=gres/gpu=<share>, MaxSubmitJobsPerAccount 50, DenyOnLimit)
+    │                  QOS=debug     (Priority 100, 30 min, 1 GPU, 1 running + 2 queued per user, DenyOnLimit)
     ├── data ├── tokenizer ├── ke2 ├── arch ├── perf ├── infra ├── monitoring ├── eval ├── posttrain ├── release ├── quant
 ```
 
@@ -143,7 +145,22 @@ root
 - `PreemptType=preempt/qos`, `PreemptMode=REQUEUE`: a preempted team job gets SIGTERM, has `GraceTime` to
   save, and goes back to the queue.
 - `AccountingStorageEnforce=associations,limits,qos`: a job with no valid account is rejected.
-- `GrpTRES=node=2` per team account, so no team takes all of `teams`.
+- `GrpTRES=node=<cap>,gres/gpu=<share>` per team account (`V5_NODE_CAP`, `V5_TEAM_GPUS`): on EC2 2 nodes and
+  16 GPUs; on the shared node, TSAI's GPU share per team (Mallik's GPU shares, team 07). A job over the share
+  waits with `AssocGrpGRES`.
+- **Per-job limits** on the team QOS (Max's queue design, team 07): `MaxWall`, `MaxTRESPerJob`, a cap on queued
+  jobs per team. `Flags=DenyOnLimit`: a job that breaks a per-job limit is **refused at submit** with the reason
+  (`QOSMaxGRESPerJob`, `QOSMaxWallDurationPerJobLimit`, `QOSMaxSubmitJobPerUserLimit`), instead of pending forever.
+- **`debug` QOS** instead of a debug partition (Max's ADR-09): one quick 1-GPU job per user ahead of the queue,
+  on the team's own nodes; the main run may preempt it.
+- **Time limit with self-requeue** for team jobs (Max's ADR-05): `--time` + `--signal=B:USR1@<lead>`, lead ≥
+  2 × the save time + 60 s. The warning reaches only the batch shell (`B:`); the wrapper passes it to the
+  trainers through `srun`; they save and exit 75; Slurm requeues the job with the same id. Long work runs in
+  segments and loses nothing. The main run keeps no time limit.
+- **Launch shape:** `srun` starts one trainer per GPU directly, with no launcher in between (Max's ADR-10
+  "alternative b"). Max checked in DeepSpeed's source that the `deepspeed` launcher dies on SIGUSR1 and kills all
+  ranks when one exits non-zero, which would break both the save-on-signal and the exit-75 contract. Our
+  DeepSpeed drills (`sim_results_deepspeed.md`) run `deepspeed.initialize` from Slurm's variables, no launcher.
 - **`GrpTRESMins` budget** per account, alerts at 50 / 75 / 90% (Q-15), hard stop at 100%.
 - **Capacity calendar:** each week's GPU-hours per team, including Team 05's ladder and the dry runs, agreed
   with the lead.
@@ -169,8 +186,8 @@ root
 - **Signals.** The trainer treats SIGUSR1 and SIGTERM the same: save, wait for the commit, exit 75.
   - Preemption: Slurm sends SIGTERM, then SIGKILL after `GraceTime` (60 s) / `KillWait` (30 s).
   - Spot notice or health drain: `scancel --signal=USR1 <job>` from the node itself (ADR 0003).
-  - The first draft relied on `--signal=USR1@120`. That only fires before a **time limit**, and the main run
-    has none, so it was dropped.
+  - Time limit (team jobs): `--signal=B:USR1@300` to the batch shell, passed on by the wrapper (above). The
+    first draft put `--signal=USR1@120` on the main run; it has no time limit, so it stays without one.
 - A node that stops answering for `SlurmdTimeout=30` s is marked DOWN and its job is requeued by Slurm.
 - **Requeue delay.** Slurm holds every requeued job until the old job's launch credential has expired
   (`cred_expire` + 1 s, default ≈ 121 s). We set **`AuthInfo=cred_expire=60`**. The man page says the credential

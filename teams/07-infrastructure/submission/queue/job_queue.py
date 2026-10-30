@@ -189,8 +189,13 @@ def run(srun_args: list, train_args: list) -> int:
 
     # Preemption sends SIGTERM to the batch shell too. Keep waiting: the trainers got the same signal,
     # they are saving, and we must report their exit code, not ours.
+    # The time-limit warning (--signal=B:USR1@<lead>) reaches only this batch shell, so pass SIGUSR1 on to the
+    # trainers through srun, which forwards it to every task. A trainer that already got it (scancel
+    # --signal=USR1 signals the steps) only sets its stop flag again.
     def forward(signum, _frame):
         emit("job.signal", signal=signal.Signals(signum).name)
+        if signum == signal.SIGUSR1 and child.poll() is None:
+            child.send_signal(signal.SIGUSR1)
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGUSR1, forward)

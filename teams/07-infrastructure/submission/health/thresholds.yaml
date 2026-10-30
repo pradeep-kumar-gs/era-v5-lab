@@ -18,9 +18,13 @@ nccl:
   busbw_floor_ratio: 0.9       # floor = 0.9 x baseline median per message size
   baseline_busbw_gbps: {}      # filled from the week-2 baseline: {size_bytes: median busbw}
   timeout_s: 120
-xid:                           # NVIDIA Xid catalog; reviewed each dry run
-  fatal: [48, 63, 64, 74, 79, 94, 95, 119, 120]
-  warn: [13, 31, 43]
+  ops: [all_reduce, reduce_scatter, all_gather, all_to_all]   # Mallik's four collectives (team 07)
+  nvlink_inactive_fail: 1      # any inactive NVLink link halves all-reduce speed with no error: drain
+xid:                           # NVIDIA Xid catalog; reviewed each dry run. 61/62/92/140 from Mallik's list (team 07)
+  fatal: [48, 61, 62, 63, 64, 74, 79, 92, 95, 119, 120, 140]
+  restart: [94]                # contained ECC: the job restarts, the GPU stays; drain only if it repeats
+  restart_window_h: 24         # a second restart-class Xid on the same GPU within this window drains the node
+  warn: [13, 31, 43]           # usually the application, not the GPU
 runtime:
   prolog_budget_s: 30
   full_budget_s: 900

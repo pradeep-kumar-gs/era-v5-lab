@@ -20,7 +20,7 @@ def test_xid_classes_and_no_second_drain(tmp_path):
     state = str(tmp_path / "seen.json")
     first = xid_scan.scan(lines, TH["xid"], state)
     assert first["status"] == "fail"
-    assert {(x["xid"], x["class"]) for x in first["new"]} == {(13, "warn"), (79, "fatal"), (94, "fatal"),
+    assert {(x["xid"], x["class"]) for x in first["new"]} == {(13, "warn"), (79, "fatal"), (94, "restart"),
                                                               (157, "unknown")}
     again = xid_scan.scan(lines, TH["xid"], state)   # same log after a repair/reboot: no new drain
     assert again["status"] == "pass" and again["already_seen"] == 4
@@ -64,19 +64,57 @@ def test_forced_fail_and_schema(tmp_path, monkeypatch):
     assert all(c["status"] in ("pass", "warn", "fail", "skipped") for c in r["checks"])
 
 
-def test_allreduce_exact_on_gloo(tmp_path):
-    out = tmp_path / "ar.json"
+def collectives(tmp_path, ranks, env=None):
+    out = tmp_path / f"coll{ranks}.json"
     import socket
     with socket.socket() as so:         # 127.0.0.1, not --standalone: a .local host name may not resolve
         so.bind(("127.0.0.1", 0))
         port = str(so.getsockname()[1])
     p = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--master-addr", "127.0.0.1",
-                        "--master-port", port, "--nproc_per_node=2",
-                        os.path.join(SUB, "health", "allreduce_test.py"), "--max-mb", "4", "--iters", "3", "--out", str(out)],
-                       capture_output=True, text=True, timeout=120)
-    r = json.load(open(out))
-    assert p.returncode == 0 and r["status"] == "pass" and r["backend"] == "gloo" and r["ranks"] == 2
-    assert all(s["busbw_gbps"] > 0 for s in r["metrics"]["sizes"])
+                        "--master-port", port, f"--nproc_per_node={ranks}",
+                        os.path.join(SUB, "health", "allreduce_test.py"), "--max-mb", "2", "--iters", "3",
+                        "--out", str(out)],
+                       capture_output=True, text=True, timeout=180, env=dict(os.environ, **(env or {})))
+    return p.returncode, json.load(open(out))
+
+
+def test_four_collectives_exact_on_gloo(tmp_path):
+    """All-reduce, reduce-scatter, all-gather and all-to-all (Mallik's set): exact values on 2 and 3 ranks."""
+    for ranks in (2, 3):
+        rc, r = collectives(tmp_path, ranks)
+        assert rc == 0 and r["status"] == "pass" and r["backend"] == "gloo" and r["ranks"] == ranks
+        assert [o["op"] for o in r["ops"]] == ["all_reduce", "reduce_scatter", "all_gather", "all_to_all"]
+        assert all(o["status"] == "pass" and all(s["busbw_gbps"] > 0 for s in o["metrics"]["sizes"]) for o in r["ops"])
+
+
+def test_a_wrong_collective_value_fails(tmp_path):
+    rc, r = collectives(tmp_path, 2, {"V5_COLL_CORRUPT": "all_to_all"})
+    st = {o["op"]: o["status"] for o in r["ops"]}
+    # torchrun reports a failed worker as exit 1; the JSON names the collective
+    assert rc != 0 and r["status"] == "fail" and st["all_to_all"] == "fail" and st["all_reduce"] == "pass"
+
+
+def test_xid94_restart_once_drain_on_repeat(tmp_path):
+    """Contained ECC (94): the job restarts and the GPU stays; a second 94 on that GPU within 24 h drains."""
+    state = str(tmp_path / "seen.json")
+    line = "kernel: NVRM: Xid (PCI:0000:5c:00): 94, pid={}, Contained ECC error."
+    assert xid_scan.scan([line.format(1)], TH["xid"], state, now=1000)["status"] == "warn"
+    assert xid_scan.scan([line.format(2)], TH["xid"], state, now=2000)["status"] == "fail"
+    assert xid_scan.scan([line.format(3)], TH["xid"], str(tmp_path / "s2.json"), now=0)["status"] == "warn"
+    later = 2000 + 25 * 3600                       # outside the window: one 94 again is only a warning
+    assert xid_scan.scan([line.format(4)], TH["xid"], state, now=later)["status"] == "warn"
+    assert xid_scan.scan(["NVRM: Xid (PCI:0000:5c:00): 61, pid=1, breakpoint"], TH["xid"])["status"] == "fail"
+
+
+def test_nvlink_inactive_link_fails(tmp_path):
+    up, down, none = tmp_path / "up", tmp_path / "down", tmp_path / "none"
+    up.write_text("GPU 0: NVIDIA H100\n\t Link 0: 26.562 GB/s\n\t Link 1: 26.562 GB/s\n")
+    down.write_text("GPU 0: NVIDIA H100\n\t Link 0: 26.562 GB/s\n\t Link 1: <inactive>\n")
+    none.write_text("GPU 0: Tesla T4\n")
+    assert health_check.nvlink_checks(TH, 8, str(up))[0]["status"] == "pass"
+    bad = health_check.nvlink_checks(TH, 8, str(down))[0]
+    assert bad["status"] == "fail" and bad["metrics"]["inactive"] == 1
+    assert health_check.nvlink_checks(TH, 8, str(none))[0]["status"] == "skipped"
 
 
 def test_periodic_mode_never_runs_dcgm_diag(tmp_path, monkeypatch):

@@ -135,6 +135,29 @@ def remap_checks(th, expect) -> list:
     return res
 
 
+def nvlink_checks(th, expect, fixture=None) -> list:
+    """Inactive NVLink links (Mallik's check, team 07). A down link does not raise an error: all-reduce just
+    runs at half speed for the whole run. Without DCGM nothing else would see it."""
+    if expect == 0 and fixture is None:
+        return []
+    if fixture:
+        out = open(fixture).read()
+    else:
+        if not shutil.which("nvidia-smi"):
+            return [check("nvlink", "skipped", "nvidia-smi not found")]
+        p = run(["nvidia-smi", "nvlink", "-s"])
+        if p.returncode != 0:
+            return [check("nvlink", "skipped", f"nvidia-smi nvlink failed: {p.stderr[:120]}")]
+        out = p.stdout
+    links = [l for l in out.splitlines() if re.search(r"\bLink \d+:", l)]
+    if not links:
+        return [check("nvlink", "skipped", "no NVLink on this GPU (e.g. PCIe cards)")]
+    down = [l.strip() for l in links if "inactive" in l.lower()]
+    st = "fail" if len(down) >= th["nccl"].get("nvlink_inactive_fail", 1) else "pass"
+    return [check("nvlink", st, f"{len(down)} of {len(links)} links inactive", required=True,
+                  metrics={"links": len(links), "inactive": len(down), "down": down[:8]})]
+
+
 def dcgm_check(level) -> list:
     if not shutil.which("dcgmi"):
         return [check("dcgm_diag", "skipped", "dcgmi not found")]
@@ -214,15 +237,21 @@ def drill_check() -> list:
 def allreduce_check(th, expect) -> list:
     nproc = max(expect, 2) if expect else 2
     out = os.path.join(STATE_DIR, "allreduce.json")
-    max_mb = "1024" if expect else "16"
+    max_mb = os.environ.get("V5_COLL_MAX_MB", "1024" if expect else "16")   # Docker test: 16 MB on CPU
+    ops = ",".join(th["nccl"].get("ops", ["all_reduce", "reduce_scatter", "all_gather", "all_to_all"]))
+    if os.path.exists(out):
+        os.remove(out)
     p = run([sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={nproc}",
-             os.path.join(HERE, "allreduce_test.py"), "--max-mb", max_mb, "--out", out],
+             os.path.join(HERE, "allreduce_test.py"), "--max-mb", max_mb, "--ops", ops, "--out", out],
             timeout=th["nccl"]["timeout_s"])
-    if p.returncode not in (0, 4) or not os.path.exists(out):
-        return [check("nccl_allreduce", "fail", f"test did not finish (exit {p.returncode})", required=True)]
+    # torchrun exits 1 whenever a worker exits non-zero, so the exit code cannot tell a wrong value (the test
+    # wrote its JSON) from a hang or crash (no JSON). The JSON decides; the old one is removed first.
+    if not os.path.exists(out):
+        return [check("nccl_collectives", "fail", f"test did not finish (exit {p.returncode})", required=True)]
     r = json.load(open(out))
-    return [check("nccl_allreduce", r["status"], f"{r['backend']} x{r['ranks']}: {r['detail']}",
-                  required=True, metrics=r["metrics"])]
+    # one check per collective: all-reduce (DDP), reduce-scatter / all-gather (ZeRO, FSDP), all-to-all (MoE)
+    return [check(o["name"], o["status"], f"{r['backend']} x{r['ranks']}: {o['detail']}", required=True,
+                  metrics=o["metrics"]) for o in r["ops"]]
 
 
 def verdict(checks) -> str:
@@ -240,6 +269,7 @@ def main(argv=None):
     ap.add_argument("--thresholds", default=os.path.join(HERE, "thresholds.yaml"))
     ap.add_argument("--kernel-log", help="read this file instead of dmesg (tests)")
     ap.add_argument("--nvidia-smi-fixture", help="read nvidia-smi CSV from this file (tests)")
+    ap.add_argument("--nvlink-fixture", help="read `nvidia-smi nvlink -s` output from this file (tests)")
     ap.add_argument("--out", help="also write the JSON report here")
     a = ap.parse_args(argv)
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -250,6 +280,7 @@ def main(argv=None):
     checks = []
     checks += timed(gpu_checks, th, expect, a.nvidia_smi_fixture)
     checks += timed(remap_checks, th, expect)
+    checks += timed(nvlink_checks, th, expect, a.nvlink_fixture)
     checks += timed(xid_check, th, a.kernel_log)
     checks += timed(clock_check, th)
     checks += timed(disk_mem_checks, th)

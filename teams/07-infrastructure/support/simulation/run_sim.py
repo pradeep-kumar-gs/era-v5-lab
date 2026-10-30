@@ -57,8 +57,16 @@ def dc(*args, check=True, capture=True):
     return p
 
 
+EVIDENCE = {"drill": None, "lines": []}   # every command a drill runs, for results/evidence/<drill>.log
+NOISY = ("cat /s3/events", "squeue -h", "scontrol show job -o", "sinfo -h")   # polling: counted, not logged
+
+
 def sh(service, cmd, check=False):
     p = dc("exec", "-T", service, "bash", "-c", cmd, check=False)
+    if EVIDENCE["drill"] and not cmd.startswith(NOISY):
+        out = (p.stdout + p.stderr).strip()
+        EVIDENCE["lines"].append(f"$ [{service}] {cmd[:600]}\n  exit {p.returncode}"
+                                 + (f"\n  " + out[:800].replace("\n", "\n  ") if out else ""))
     if check and p.returncode != 0:
         raise RuntimeError(f"{service}: {cmd}\n{p.stdout}\n{p.stderr}")
     return p
@@ -155,10 +163,22 @@ def record(drill, ok, **detail):
 
 
 def run_drill(name, fn):
+    """Runs one drill and writes its evidence (Max's evidence folders, team 07): every command with its exit code
+    and output, and the results it recorded, so a reviewer can check the claim without rerunning it."""
+    EVIDENCE.update(drill=name, lines=[])
+    n0 = len(results)
     try:
         fn()
     except Exception as e:  # noqa: BLE001 - a failed drill is a result, not the end of the simulation
         record(name, False, error=str(e)[:400])
+    finally:
+        os.makedirs(os.path.join(RESULTS, "evidence"), exist_ok=True)
+        with open(os.path.join(RESULTS, "evidence", f"{name}.log"), "w") as f:
+            f.write(f"# drill {name} ({time.strftime('%Y-%m-%d %H:%M:%S %Z')})\n\n## results\n")
+            for r in results[n0:]:
+                f.write(f"{'PASS' if r['pass'] else 'FAIL'} {json.dumps(r)}\n")
+            f.write("\n## commands (polling commands not listed)\n" + "\n".join(EVIDENCE["lines"])[-200_000:] + "\n")
+        EVIDENCE.update(drill=None, lines=[])
 
 
 def main_job():
@@ -211,6 +231,139 @@ def d_accounts():
         emit("job.rejected", user="noacct")
     record("accounts", jid is not None and "Invalid account" in err2,
            accepted_job=jid, rejected_no_account=err2[:120])
+
+
+def submit_as(user, args, wrap="sleep 120"):
+    """sbatch as a test user; returns (job id or None, sbatch's message)."""
+    p = ctl(f"cd /tmp && runuser -u {user} -- sbatch --parsable -o /dev/null {args} --wrap {shlex.quote(wrap)}")
+    return (p.stdout.strip().split(";")[0] or None) if p.returncode == 0 else None, (p.stdout + p.stderr).strip()
+
+
+def state_reason(jid):
+    j = job(jid)
+    return j.get("JobState"), j.get("Reason")
+
+
+def d_limits():
+    """Account, QOS and GPU-share limits, each with the exact Slurm reason (Max's T05-T11 and Mallik's GPU-share
+    test, team 07). Users: alice (arch), bob (perf), carol (no account). Runs on the idle cluster."""
+    gpu = "-p gpu --time=00:05:00 --nodes=1 --gpus-per-node=2"
+    _, err = submit_as("alice", f"--account=perf {gpu}")
+    record("limit_wrong_account_refused", "Invalid account" in err, message=err[:140])
+    _, err = submit_as("carol", f"{gpu}")
+    record("limit_no_account_refused", "Invalid account" in err or "association" in err.lower(), message=err[:140])
+
+    # GPU share: arch may hold 4 GPUs (2 jobs x 2). The third job waits on the share although a node is free.
+    jobs = [submit_as("alice", f"--account=arch {gpu}")[0] for _ in range(3)]
+    wait(lambda: [state_reason(j)[0] for j in jobs[:2]] == ["RUNNING", "RUNNING"], 60, "two arch jobs running")
+    time.sleep(3)
+    st3 = state_reason(jobs[2])
+    idle = ctl("sinfo -h -p gpu -t idle -o %D").stdout.strip()
+    record("limit_gpu_share_waits", st3 == ("PENDING", "AssocGrpGRES"), third_job=st3, idle_gpu_nodes=idle)
+
+    # Someone else cannot cancel alice's job; alice can.
+    p = ctl(f"runuser -u bob -- scancel {jobs[0]}")
+    still = state_reason(jobs[0])[0]
+    record("limit_cross_user_cancel_refused", still == "RUNNING", bob_scancel=(p.stdout + p.stderr).strip()[:140],
+           state_after=still)
+    ctl(f"runuser -u alice -- scancel {' '.join(jobs)}")
+
+    # Per-job limits are refused at submit (QOS Flags=DenyOnLimit), with the reason, instead of pending forever.
+    _, err = submit_as("alice", "--account=arch -p gpu --time=00:05:00 --nodes=3 --gpus-per-node=2")
+    record("limit_gpus_per_job_refused", "policy" in err.lower() or "QOS" in err, gpus=6, message=err[:160])
+    _, err = submit_as("alice", "--account=arch -p gpu --time=25:00:00 --nodes=1 --gpus-per-node=2")
+    record("limit_maxwall_refused", "policy" in err.lower() or "time limit" in err.lower(), time="25:00:00",
+           message=err[:160])
+
+    # debug QOS: 1 GPU, 1 running job and 2 queued per user, 30 min.
+    dbg = "--account=arch --qos=debug -p debug --time=00:05:00 --gpus-per-node=1"
+    d1, _ = submit_as("alice", dbg)
+    d2, _ = submit_as("alice", dbg)
+    d3, err3 = submit_as("alice", dbg)
+    _, err_big = submit_as("alice", "--account=arch --qos=debug -p debug --time=00:05:00 --gpus-per-node=2")
+    wait(lambda: state_reason(d1)[0] == "RUNNING", 60, "debug job running")
+    time.sleep(3)
+    st2 = state_reason(d2)
+    record("limit_debug_qos", st2 == ("PENDING", "QOSMaxJobsPerUserLimit") and d3 is None and bool(err_big),
+           second=st2, third_refused=err3[:100], two_gpus_refused=err_big[:100])
+    ctl(f"runuser -u alice -- scancel {d1} {d2}; true")
+
+
+def d_health_fakes():
+    """The GPU checks really run in Docker, on a fake nvidia-smi and dmesg (Mallik's fakes, team 07): healthy
+    nodes pass; each planted fault fails the right check; Xid 94 once is only a warning; and one fault is drained
+    end to end by the periodic health check, as on a real node."""
+    hc = (f". /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill {PY} /opt/v5/submission/health/health_check.py "
+          "--mode periodic --report-only")
+
+    def report(host):
+        out = sh(host, hc).stdout
+        r = json.loads(out[out.index("{"):])
+        worst = {}                       # one entry per check name, the worst over the GPUs
+        rank = {"skipped": 0, "pass": 1, "warn": 2, "fail": 3}
+        for c in r["checks"]:
+            if rank[c["status"]] >= rank.get(worst.get(c["name"]), -1):
+                worst[c["name"]] = c["status"]
+        return r["verdict"], worst
+
+    ok = {}
+    for h in ("c1", "c2", "c3"):
+        v, st = report(h)
+        ok[h] = (v, st.get("gpu_count"), st.get("nvlink"), st.get("remapped_rows"))
+    record("health_gpu_checks_run", all(x == ("pass", "pass", "pass", "pass") for x in ok.values()), nodes=ok)
+
+    faults = [("gpus", "1 temperature.gpu=92", "gpu_temperature", "fail"),
+              ("gpus", "0 ecc.errors.uncorrected.volatile.total=3", "ecc_uncorrectable", "fail"),
+              ("remap", "0 failure", "remapped_rows", "fail"),
+              ("nvlink", "GPU 0: Fake\n\t Link 0: <inactive>\n\t Link 1: 26.562 GB/s", "nvlink", "fail"),
+              ("dmesg", "NVRM: Xid (PCI:0000:3b:00): 79, pid=1, GPU has fallen off the bus.", "xid", "fail"),
+              ("dmesg", "NVRM: Xid (PCI:0000:3b:00): 94, pid=1, Contained ECC error.", "xid", "warn")]
+    got = []
+    for f, content, name, want in faults:
+        sh("c3", f"rm -rf /tmp/hc-drill; printf '%b\\n' {shlex.quote(content)} > /run/fake/{f}")
+        v, st = report("c3")
+        sh("c3", "rm -f /run/fake/*")
+        got.append({"fault": f"{f}: {content[:40]}", "check": name, "status": st.get(name), "verdict": v})
+    record("health_planted_faults", all(g["status"] == w for g, (_, _, _, w) in zip(got, faults)), faults=got)
+    # The periodic check (every 30 s) may have seen a planted fault and drained c3 meanwhile: put it back.
+    ctl("scontrol update nodename=c3 state=resume 2>/dev/null; true")
+
+    # End to end: the periodic HealthCheckProgram (every 30 s) finds the inactive NVLink link and drains c3.
+    t = mark("nvlink_down", target="c3", cause_class="gpu")
+    sh("c3", "printf 'GPU 0: Fake\\n\\t Link 0: <inactive>\\n' > /run/fake/nvlink")
+    drained = wait(lambda: ev_after(t, "node.drained", run=None, node="c3"), 90, "c3 drained by the periodic check")
+    reason = ctl("sinfo -h -n c3 -o '%E'").stdout.strip()
+    sh("c3", "rm -f /run/fake/*")
+    resume_node("c3")
+    record("health_nvlink_drains_node", "nvlink" in reason, reason=reason, drained_reason=drained.get("reason"))
+
+
+def d_time_limit():
+    """A team job reaches its time limit: Slurm warns the batch shell (--signal=B:USR1@60), the wrapper passes it to
+    the trainers, they save and exit 75, Slurm requeues the job with the same id, and it resumes at the saved step
+    (Max's self-requeue, team 07)."""
+    t = mark("time_limit", cause_class="planned")
+    jid, err = sbatch("/opt/v5/submission/slurm/team_job.sbatch", dict(TEAM_ENV, RUN_ID="timelimit", STEPS="100000"),
+                      f"--account=arch {TEAM_ARGS} --time=00:02:00 --signal=B:USR1@60")
+    if jid is None:
+        raise RuntimeError(err)
+    stop = wait(lambda: ev_after(t, "train.stop_requested", run="timelimit"), 200, "time-limit warning")
+    saved = wait(lambda: ev_after(t, "checkpoint.committed", run="timelimit", reason="signal"), 60, "save on warning")
+    rd = wait(lambda: ev_after(saved["time"], "restore.done", run="timelimit"), 240, "requeued segment restored")
+    j = job(jid)
+    ctl(f"scancel {jid}")
+    record("time_limit_self_requeue", rd["step"] == saved["step"] and int(j.get("Restarts", 0)) >= 1,
+           job=jid, signal=stop.get("signal"), saved_step=saved["step"], restored_step=rd["step"],
+           restarts=j.get("Restarts"), lost_steps=saved["step"] - rd["step"])
+
+
+def d_start_main():
+    """Smoke mode only: start the main run and wait for its first commit."""
+    t = mark("start_main")
+    jid, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
+    wait(lambda: job(jid).get("JobState") == "RUNNING", 180, "main run RUNNING")
+    c = wait(lambda: ev_after(t, "checkpoint.committed"), 120, "first commit")
+    record("main_run_started", True, job=jid, first_commit=c["step"])
 
 
 def d_preemption():
@@ -576,7 +729,12 @@ def up():
     dc("down", "-v", check=False)
     dc("up", "-d", "--build")
     wait(lambda: "4" in ctl("sinfo -h -t idle -o %D -p debug").stdout, 180, "4 idle nodes")
-    ctl("bash /opt/v5/submission/slurm/setup_accounts.sh >/dev/null", check=True)
+    # Docker: 2 GPUs per node, so a team's share is 4 GPUs; node cap 3 lets the GPU share be the limit tested.
+    ctl("V5_TEAM_GPUS=4 V5_NODE_CAP=3 bash /opt/v5/submission/slurm/setup_accounts.sh >/dev/null", check=True)
+    # Test users (fixed UIDs made by entrypoint.sh): alice in arch, bob in perf, carol in no account.
+    ctl("S='sacctmgr -i'; $S add user alice Account=arch DefaultAccount=arch >/dev/null 2>&1; "
+        "$S add user bob Account=perf DefaultAccount=perf >/dev/null 2>&1; "
+        "$S modify user where name=alice,bob set QOS=normal,debug DefaultQOS=normal", check=True)
     ctl("mkdir -p /s3/logs /s3/events /s3/runs /s3/drills /s3/backups && chmod 1777 /s3/*", check=True)
     # Live alerting, as Team 08's pager would run it: every 15 s, new alerts become alert.fired events.
     dc("exec", "-d", "c4", "bash", "-c",
@@ -612,6 +770,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep-up", action="store_true", help="leave the cluster running afterwards")
     ap.add_argument("--only", nargs="+", metavar="DRILL", help="run only these drills (debugging; no summary written)")
+    ap.add_argument("--smoke", action="store_true",
+                    help="quick check (~5 min after start): limits, health fakes, one kill + restore; no summary written")
     ap.add_argument("--deepspeed", action="store_true",
                     help="every training job uses DeepSpeed ZeRO-1; results go to results_deepspeed/")
     a = ap.parse_args()
@@ -621,11 +781,14 @@ def main():
         RESULTS = os.path.join(HERE, "results_deepspeed")
         for e in (MAIN_ENV, TEAM_ENV):
             e.update(V5_DEEPSPEED="1", V5_ZERO_STAGE="1")
+    if a.smoke:
+        RESULTS = os.path.join(HERE, "results_smoke")
     if not shutil.which("docker"):
         sys.exit("docker is needed")
     t0 = time.time()
     up()
-    plan = [("accounts", d_accounts), ("preemption", d_preemption), ("gpu_allocation", d_gpu_allocation),
+    plan = [("accounts", d_accounts), ("limits", d_limits), ("health_fakes", d_health_fakes),
+            ("time_limit", d_time_limit), ("preemption", d_preemption), ("gpu_allocation", d_gpu_allocation),
             ("crash_loop", d_crash_loop)]
     plan += [(f"kill_{i}", d_kill(i)) for i in range(1, REPEATS + 1)]
     plan += [(f"sigusr1_{i}", d_usr1(i)) for i in range(1, REPEATS + 1)]
@@ -634,13 +797,23 @@ def main():
              ("node_loss", d_node_loss), ("ctld_failover", d_ctld_failover), ("db_backup", d_db_backup),
              ("split_brain", d_split_brain), ("nan", d_nan_rollback_reshard), ("budget", d_budget_fairshare), ("retention", d_retention_export),
              ("live_alerts", d_live_alerts)]
+    if a.smoke:      # Mallik's 90-second test.sh idea, on this cluster
+        plan = [("accounts", d_accounts), ("limits", d_limits), ("health_fakes", d_health_fakes),
+                ("start_main", d_start_main), ("kill_1", d_kill(1))]
     if a.only:
         plan = [(n, f) for n, f in plan if n in a.only]
     for name, fn in plan:
         log(f"--- drill: {name}")
         run_drill(name, fn)
-    if a.only:
-        log(f"{sum(r['pass'] for r in results)}/{len(results)} selected drills passed (no summary written)")
+    if a.smoke:
+        with open(os.path.join(RESULTS, "drills.json"), "w") as f:
+            json.dump({"duration_s": round(time.time() - t0), "passed": sum(r["pass"] for r in results),
+                       "total": len(results), "drills": results}, f, indent=1)
+    if a.only or a.smoke:
+        log(f"{sum(r['pass'] for r in results)}/{len(results)} selected drills passed in "
+            f"{round(time.time() - t0)} s (no summary written)")
+        if not a.keep_up:
+            dc("down", "-v", check=False)
         return 0 if all(r["pass"] for r in results) else 1
     ctl("scancel -u svc; true")
     log("evaluating metrics")

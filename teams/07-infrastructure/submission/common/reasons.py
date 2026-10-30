@@ -99,6 +99,20 @@ CAUSES = {
         meaning="The model code has different tensor names, shapes or dtypes than the checkpoint (the V4 misload).",
         auto="restore refused; every key that differs is listed in the job log",
         you_do="fix the model code or the checkpoint mapping; never resume by ignoring keys", alert="CK-06"),
+    "FrozenChangedError": dict(
+        title="frozen tensor changed: held", severity="high",
+        meaning="A tensor that must never train (e.g. the KE2 Kronecker tables) changed since the last checkpoint. "
+                "Training touched it: a missing requires_grad=False, or an optimizer that includes it.",
+        auto="nothing saved (the previous checkpoint is still good); job held",
+        you_do="find which code trains the named tensor (the job log lists it), fix it, then roll back to the last "
+               "checkpoint: " + ROLLBACK, alert="CK-06"),
+    "DataManifestError": dict(
+        title="other data: held", severity="high",
+        meaning="The data loader's shard list differs from the one this checkpoint was trained on. Resuming "
+                "would continue on other data without anyone noticing.",
+        auto="restore refused before any step; nothing was lost",
+        you_do="point the loader back at the run's shard list, or, if new data is intended, start a new branch "
+               "and tell Teams 01/02", alert="CK-06"),
     "EnvMismatchError": dict(
         title="environment changed: held", severity="high",
         meaning="The software or config differs from the checkpoint (image digest, torch/CUDA/NCCL, config sha, "
@@ -167,7 +181,8 @@ DRAIN = {
                           "replace the instance (stop/start moves it to new hardware)"),
     "remapped_rows": ("GPU memory row remap failed (or is pending a reset).", "node drained on failure",
                       "failure: replace; pending: reset the GPU / reboot"),
-    "xid": ("The GPU driver logged a fatal Xid error (79 off the bus, 94/95 memory, …).",
+    "xid": ("The GPU driver logged a fatal Xid error (79 off the bus, 95 uncontained memory error, …), "
+            "or Xid 94 (contained ECC) twice on one GPU within 24 h.",
             "node drained, jobs saved and moved", "replace the instance; the Xid code is in the health report"),
     "dcgm_diag": ("NVIDIA's diagnostic failed.", "node drained", "replace the instance"),
     "dcgm_health": ("DCGM's background health watch reports a GPU failure (PCIe, memory, NVLink, thermal or power).",
@@ -177,8 +192,18 @@ DRAIN = {
                   "clean /nvme, then `scontrol update nodename=<n> state=resume`"),
     "clock_offset": ("The node clock is off by more than 100 ms.", "node drained",
                      "fix chrony (Amazon Time Sync), then resume the node"),
-    "nccl_allreduce": ("All-reduce gave a wrong sum, timed out or was too slow.", "node drained",
-                       "run health_check.py --mode full on it; replace if it fails again"),
+    "nccl_collectives": ("The collective test did not finish (hang, crash or timeout).", "node drained",
+                         "run health_check.py --mode full on it; read the NCCL flight-recorder dump; replace if it fails again"),
+    "nccl_all_reduce": ("All-reduce (data-parallel gradients) gave a wrong value or was too slow.", "node drained",
+                        "run health_check.py --mode full on it; replace if it fails again"),
+    "nccl_reduce_scatter": ("Reduce-scatter (ZeRO/FSDP gradients) gave a wrong value or was too slow.",
+                            "node drained", "run health_check.py --mode full on it; replace if it fails again"),
+    "nccl_all_gather": ("All-gather (ZeRO-3/FSDP weights) gave a wrong value or was too slow.", "node drained",
+                        "run health_check.py --mode full on it; replace if it fails again"),
+    "nccl_all_to_all": ("All-to-all (MoE expert exchange) gave a wrong value or was too slow.", "node drained",
+                        "run health_check.py --mode full on it; replace if it fails again"),
+    "nvlink": ("An NVLink link between GPUs is inactive: no error, but all-reduce runs at about half speed.",
+               "node drained", "reset the GPUs or reboot; replace the instance if the link stays down"),
     "drill_force_fail": ("A drill forced this node to fail (test only).", "node drained",
                          "remove /var/lib/v5-health/force_fail and resume the node"),
 }
@@ -192,6 +217,11 @@ SLURM = {
     "Priority": "higher-priority jobs are ahead. Normal for team jobs.",
     "AssocGrpCPUMinutesLimit": "the account's budget (GrpTRESMins) is used up. Talk to the lead (Q-15).",
     "AssocGrpGRESMinutes": "the account's GPU-minute budget is used up. Talk to the lead (Q-15).",
+    "AssocGrpGRES": "the team already uses its GPU share (GrpTRES=gres/gpu). It starts when its own jobs free GPUs.",
+    "QOSMaxGRESPerJob": "the job asks for more GPUs than its QOS allows per job. Ask for fewer, or use another QOS.",
+    "QOSMaxWallDurationPerJobLimit": "--time is above the QOS MaxWall. Ask for less; long runs requeue themselves.",
+    "QOSMaxSubmitJobPerUserLimit": "the user has the most jobs this QOS lets one user queue. Wait or cancel some.",
+    "QOSMaxJobsPerUserLimit": "the user already runs the most jobs this QOS allows at once. It starts when one ends.",
     "AssocGrpNodeLimit": "the team already holds its 2 nodes (GrpTRES=node=2). It starts when one frees up.",
     "ReqNodeNotAvail": "the nodes asked for are drained or down. Check `sinfo -R`.",
     "PREEMPTED": "a team job gave its node to the main run; it saved and is back in the queue.",

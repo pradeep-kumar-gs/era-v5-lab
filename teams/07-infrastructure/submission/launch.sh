@@ -28,7 +28,7 @@ why() {  # one line per step: what it proves (bash 3.2 has no associative arrays
     slurmctld) echo "primary and backup controller up; scontrol ping shows both" ;;
     accounts) echo "accounts, QOS and limits loaded (setup_accounts.sh, safe twice)" ;;
     slurmd) echo "every GPU node registered and idle" ;;
-    health) echo "full health check on every GPU node (GPUs, ECC, Xid, NVMe, all-reduce); failures drain themselves" ;;
+    health) echo "full health check on every GPU node (GPUs, ECC, NVLink, Xid, NVMe, 4 collectives); a failing node is drained" ;;
     services) echo "hot-spare timer and alert watcher on the controller, spot watcher on every node" ;;
     store) echo "checkpoint store: write, read, and a stale write refused (fencing depends on it)" ;;
     submit) echo "main run submitted (unless already queued), RUNNING, claimed its epoch, restored and started" ;;
@@ -183,20 +183,33 @@ step_slurmd() {
 }
 
 step_health() {
-  # Every node at once (the deep check takes minutes); each node drains itself on a failure.
-  local pids=() h
+  # Every node at once (the deep check takes minutes). health_check.py exits 0 pass, 3 warn, 4 fail. Full mode
+  # does not drain by itself (only the periodic check does), so a failed node is drained here, with the
+  # failed checks as the reason: the main run must never land on it.
+  local pids=() h rc
   mkdir -p "$(dirname "$LOG")"
   for h in "${NODES[@]}"; do
     on "$h" "source /etc/v5/node.env 2>/dev/null; V5_EVENTS_DIR=$V5_EVENTS_DIR $V5_PY $SUB/health/health_check.py --mode full" \
       >"$LOG.health.$h.json" 2>&1 &
     pids+=($!)
   done
-  local ok=0 bad=()
+  local ok=0 bad=() warn=()
   for i in "${!NODES[@]}"; do
-    if wait "${pids[$i]}"; then ok=$((ok + 1)); else bad+=("${NODES[$i]}"); fi
+    h=${NODES[$i]}
+    wait "${pids[$i]}"; rc=$?
+    if [[ $rc == 0 || $rc == 3 ]]; then
+      ok=$((ok + 1)); [[ $rc == 3 ]] && warn+=("$h")
+    else
+      bad+=("$h")
+      [[ $DRY == 1 ]] && continue
+      local why
+      why=$(sed -n 's/.*"drain_reason": "\([^"]*\)".*/\1/p' "$LOG.health.$h.json" | head -1)
+      ctl "scontrol update nodename=$h state=drain reason='health: ${why:-full check exit $rc}'" \
+        || fail "could not drain $h"
+    fi
   done
   [[ $DRY == 1 ]] && return 0
-  say "  healthy: $ok of ${#NODES[@]}${bad:+; drained: ${bad[*]} (reports: $LOG.health.<node>.json)}"
+  say "  healthy: $ok of ${#NODES[@]}${warn:+ (warnings: ${warn[*]})}${bad:+; drained: ${bad[*]} (reports: $LOG.health.<node>.json)}"
   [[ $ok -ge $V5_MIN_NODES ]] || fail "only $ok healthy nodes, the main run needs $V5_MIN_NODES"
 }
 

@@ -243,6 +243,9 @@ checksum S3 stored at upload and downloads nothing (TB-size checkpoints).
 | T25 | the same with two real trainer processes | the old one exits 78 `FencedError`; none of its commits land after the claim |
 | T26 | conditional writes, folder store and S3 emulator | old version loses; 60 parallel appends lose no line; 4 claims at once never share an epoch |
 | T27 | async save on CPU, slow writer, weights change right after `save()` | the checkpoint still restores exactly what was saved (we copy CPU tensors ourselves) |
+| T28 | a frozen table changed by training | the next save is refused; `latest.json` keeps the last good step |
+| T29 | another embedding policy | resume refused (78), naming `embedding_policy_id` |
+| T30 | a loader reading another shard list | restore refused (`DataManifestError`) instead of training on other data |
 
 Run them from `teams/07-infrastructure`:
 

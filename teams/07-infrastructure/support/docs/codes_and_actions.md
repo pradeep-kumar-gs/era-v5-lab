@@ -32,6 +32,8 @@ Raw trainer exit codes (before the wrapper maps them to 75, or 78 after 3 crashe
 | `nonfinite` | high | The loss (or the state) became NaN/Inf. Nothing was saved after it. | no checkpoint written; job held | roll back: sbatch --export=ALL,TRAIN_EXTRA="--from-step <last good step> --skip <N> --branch <new name>" slurm/mainrun.sbatch (last good step: python ckpt/ckpt.py list --run <run>), skipping the batches around the bad step | CK-07 |
 | `loss_spike` | high | The loss stayed above 1.5 × its recent median for 3 steps: the model is diverging, even without NaN. | no checkpoint written during the spike; job held | roll back: sbatch --export=ALL,TRAIN_EXTRA="--from-step <last good step> --skip <N> --branch <new name>" slurm/mainrun.sbatch (last good step: python ckpt/ckpt.py list --run <run>); tell Team 05 | H-24 |
 | `StrictLoadError` | high | The model code has different tensor names, shapes or dtypes than the checkpoint (the V4 misload). | restore refused; every key that differs is listed in the job log | fix the model code or the checkpoint mapping; never resume by ignoring keys | CK-06 |
+| `FrozenChangedError` | high | A tensor that must never train (e.g. the KE2 Kronecker tables) changed since the last checkpoint. Training touched it: a missing requires_grad=False, or an optimizer that includes it. | nothing saved (the previous checkpoint is still good); job held | find which code trains the named tensor (the job log lists it), fix it, then roll back to the last checkpoint: roll back: sbatch --export=ALL,TRAIN_EXTRA="--from-step <last good step> --skip <N> --branch <new name>" slurm/mainrun.sbatch (last good step: python ckpt/ckpt.py list --run <run>) | CK-06 |
+| `DataManifestError` | high | The data loader's shard list differs from the one this checkpoint was trained on. Resuming would continue on other data without anyone noticing. | restore refused before any step; nothing was lost | point the loader back at the run's shard list, or, if new data is intended, start a new branch and tell Teams 01/02 | CK-06 |
 | `EnvMismatchError` | high | The software or config differs from the checkpoint (image digest, torch/CUDA/NCCL, config sha, OMP_NUM_THREADS). | restore refused; the differences are listed in the job log | if the change is intended and approved, resubmit with TRAIN_EXTRA=--allow-env-change (it is logged); otherwise go back to the old image | CK-06 |
 | `CheckpointError` | high | Every committed checkpoint failed its checks, or the requested step does not exist. | restore refused | python ckpt/ckpt.py list/verify --run <run>; check S3 and CK-04/CK-05 | CK-06 |
 | `nvme_full` | high | The node's NVMe has less free space than 1.2 × this node's checkpoint share. | save skipped (training continues, but nothing new is protected) | free NVMe space (old restore folders, data cache) or drain the node | CK-03 |
@@ -51,13 +53,18 @@ Raw trainer exit codes (before the wrapper maps them to 75, or 78 after 3 crashe
 | `gpu_count` | Fewer GPUs visible than expected. | node drained, jobs saved and moved | reboot the instance; if still missing, replace it |
 | `ecc_uncorrectable` | A GPU memory error lost data. | node drained, jobs saved and moved | replace the instance (stop/start moves it to new hardware) |
 | `remapped_rows` | GPU memory row remap failed (or is pending a reset). | node drained on failure | failure: replace; pending: reset the GPU / reboot |
-| `xid` | The GPU driver logged a fatal Xid error (79 off the bus, 94/95 memory, …). | node drained, jobs saved and moved | replace the instance; the Xid code is in the health report |
+| `xid` | The GPU driver logged a fatal Xid error (79 off the bus, 95 uncontained memory error, …), or Xid 94 (contained ECC) twice on one GPU within 24 h. | node drained, jobs saved and moved | replace the instance; the Xid code is in the health report |
 | `dcgm_diag` | NVIDIA's diagnostic failed. | node drained | replace the instance |
 | `dcgm_health` | DCGM's background health watch reports a GPU failure (PCIe, memory, NVLink, thermal or power). | node drained; its jobs saved and moved | run `health_check.py --mode full`; replace if it fails again |
 | `gpu_temperature` | A GPU is at its slowdown temperature. | node drained | check cooling; replace if repeated |
 | `nvme_free` | Local disk too full for the next checkpoint. | node drained | clean /nvme, then `scontrol update nodename=<n> state=resume` |
 | `clock_offset` | The node clock is off by more than 100 ms. | node drained | fix chrony (Amazon Time Sync), then resume the node |
-| `nccl_allreduce` | All-reduce gave a wrong sum, timed out or was too slow. | node drained | run health_check.py --mode full on it; replace if it fails again |
+| `nccl_collectives` | The collective test did not finish (hang, crash or timeout). | node drained | run health_check.py --mode full on it; read the NCCL flight-recorder dump; replace if it fails again |
+| `nccl_all_reduce` | All-reduce (data-parallel gradients) gave a wrong value or was too slow. | node drained | run health_check.py --mode full on it; replace if it fails again |
+| `nccl_reduce_scatter` | Reduce-scatter (ZeRO/FSDP gradients) gave a wrong value or was too slow. | node drained | run health_check.py --mode full on it; replace if it fails again |
+| `nccl_all_gather` | All-gather (ZeRO-3/FSDP weights) gave a wrong value or was too slow. | node drained | run health_check.py --mode full on it; replace if it fails again |
+| `nccl_all_to_all` | All-to-all (MoE expert exchange) gave a wrong value or was too slow. | node drained | run health_check.py --mode full on it; replace if it fails again |
+| `nvlink` | An NVLink link between GPUs is inactive: no error, but all-reduce runs at about half speed. | node drained | reset the GPUs or reboot; replace the instance if the link stays down |
 | `drill_force_fail` | A drill forced this node to fail (test only). | node drained | remove /var/lib/v5-health/force_fail and resume the node |
 
 After the fix: `scontrol update nodename=<node> state=resume`.
@@ -73,6 +80,11 @@ After the fix: `scontrol update nodename=<node> state=resume`.
 | `Priority` | higher-priority jobs are ahead. Normal for team jobs. |
 | `AssocGrpCPUMinutesLimit` | the account's budget (GrpTRESMins) is used up. Talk to the lead (Q-15). |
 | `AssocGrpGRESMinutes` | the account's GPU-minute budget is used up. Talk to the lead (Q-15). |
+| `AssocGrpGRES` | the team already uses its GPU share (GrpTRES=gres/gpu). It starts when its own jobs free GPUs. |
+| `QOSMaxGRESPerJob` | the job asks for more GPUs than its QOS allows per job. Ask for fewer, or use another QOS. |
+| `QOSMaxWallDurationPerJobLimit` | --time is above the QOS MaxWall. Ask for less; long runs requeue themselves. |
+| `QOSMaxSubmitJobPerUserLimit` | the user has the most jobs this QOS lets one user queue. Wait or cancel some. |
+| `QOSMaxJobsPerUserLimit` | the user already runs the most jobs this QOS allows at once. It starts when one ends. |
 | `AssocGrpNodeLimit` | the team already holds its 2 nodes (GrpTRES=node=2). It starts when one frees up. |
 | `ReqNodeNotAvail` | the nodes asked for are drained or down. Check `sinfo -R`. |
 | `PREEMPTED` | a team job gave its node to the main run; it saved and is back in the queue. |

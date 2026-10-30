@@ -568,3 +568,67 @@ def test_t27_async_save_owns_its_copy(env, monkeypatch):
     m2, o2, l2, p2 = tiny_state()
     info = Checkpointer("as", env.local + "_2", env.remote, seed=SEED).restore(m2, o2, l2, p2)
     assert info["step"] == 2 and not env.events_named("restore.failed")
+
+
+# ----------------------------------------------------------------------------- merged from Mallik's design (T28-T30)
+
+def test_t28_frozen_change_refused_at_save(env, monkeypatch):
+    """A frozen tensor (the KE2 table) that training changed is refused at the next save, not only noticed at the
+    next restore (Mallik's rule, team 07). Nothing is written; latest.json keeps the good checkpoint."""
+    from ckpt.ckpt import FrozenChangedError
+    from trainer.tiny import FROZEN_KEYS
+    monkeypatch.setenv("V5_EVENTS_DIR", env.events)
+    monkeypatch.setenv("V5_ASYNC_SAVE", "0")
+    ck = Checkpointer("fz", env.local, env.remote, seed=SEED, frozen_keys=FROZEN_KEYS)
+    model, optim, loader, probe = tiny_state()
+    train_steps(model, optim, loader, 2)
+    assert ck.save(2, model, optim, loader, probe) and ck.wait()
+    good = env.latest("fz")
+    train_steps(model, optim, loader, 2)
+    assert ck.save(4, model, optim, loader, probe) and ck.wait()      # unchanged frozen table: saves fine
+    with torch.no_grad():
+        getattr(model, FROZEN_KEYS[0]).add_(1.0)                       # a bug trains the frozen table
+    with pytest.raises(FrozenChangedError, match=FROZEN_KEYS[0]):
+        ck.save(6, model, optim, loader, probe)
+    assert env.latest("fz")["step"] == 4 and good["step"] == 2
+    # the reference also comes from a restore: a fresh process that changes it is refused too
+    ck2 = Checkpointer("fz", env.local + "_2", env.remote, seed=SEED, frozen_keys=FROZEN_KEYS)
+    m2, o2, l2, p2 = tiny_state()
+    assert ck2.restore(m2, o2, l2, p2)["step"] == 4
+    with torch.no_grad():
+        getattr(m2, FROZEN_KEYS[0]).mul_(2.0)
+    with pytest.raises(FrozenChangedError):
+        ck2.save(5, m2, o2, l2, p2)
+
+
+def test_t29_embedding_policy_is_part_of_the_environment(env):
+    """Another embedding policy (Team 04's KE2 vs plain) refuses to resume, naming the field (Mallik's meta)."""
+    env.run("--run-id", "ep", "--steps", 4, "--interval-s", 999, check=0,
+            env_extra={"V5_EMBEDDING_POLICY_ID": "ke2-v1"})
+    env.run("--run-id", "ep", "--steps", 6, "--interval-s", 999, check=78,
+            env_extra={"V5_EMBEDDING_POLICY_ID": "plain"})
+    fatal = [e for e in env.events_named("restore.fatal") if e["run_id"] == "ep"]
+    assert fatal and fatal[-1]["cause"] == "EnvMismatchError" and "embedding_policy_id" in fatal[-1]["detail"]
+    env.run("--run-id", "ep", "--steps", 6, "--interval-s", 999, check=0,
+            env_extra={"V5_EMBEDDING_POLICY_ID": "ke2-v1"})
+
+
+def test_t30_other_data_manifest_refused(env, monkeypatch):
+    """A loader reading another shard list refuses the saved position (DataManifestError, hold), instead of
+    resuming on other data. The contract check also requires the manifest field."""
+    from ckpt.ckpt import DataManifestError
+    from ckpt.loader_contract import check
+    monkeypatch.setenv("V5_EVENTS_DIR", env.events)
+    monkeypatch.setenv("V5_ASYNC_SAVE", "0")
+    ck = Checkpointer("dm", env.local, env.remote, seed=SEED)
+    model, optim, loader, probe = tiny_state()
+    train_steps(model, optim, loader, 2)
+    assert ck.save(2, model, optim, loader, probe) and ck.wait()
+    m2, o2, _, p2 = tiny_state()
+    with pytest.raises(DataManifestError, match="manifest"):
+        Checkpointer("dm", env.local + "_2", env.remote, seed=SEED).restore(m2, o2, SyntheticLoader(SEED + 1, 8, 0, 1), p2)
+
+    class NoManifest(SyntheticLoader):
+        def state_dict(self):
+            return {k: v for k, v in super().state_dict().items() if k != "manifest"}
+    assert any("manifest" in p for p in check(lambda r, w: NoManifest(SEED, 8, r, w)))

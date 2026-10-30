@@ -93,6 +93,16 @@ class UploadTimeout(CheckpointError):
     """A rank did not finish its upload in time. This save is not committed; training continues."""
 
 
+class FrozenChangedError(CheckpointError):
+    """A frozen tensor (e.g. the KE2 Kronecker tables) changed since the last checkpoint: training touched a part
+    that must never change. Never saved; hold the job (Mallik's rule, team 07: check at save, not only at restore)."""
+
+
+class DataManifestError(CheckpointError):
+    """The data loader's shard list (manifest sha) differs from the one the checkpoint was trained on. Resuming
+    would continue on other data without anyone noticing: hold the job."""
+
+
 class FencedError(CheckpointError):
     """A newer attempt of this run has claimed `latest.json`. This attempt must not commit: stop."""
 
@@ -331,13 +341,32 @@ def env_manifest(config_path: str = None) -> dict:
         # Found in the Docker test: OMP_NUM_THREADS changes the last bits of the loss on CPU even with
         # torch.set_num_threads(1). Thread count is part of the environment for a bit-equal resume.
         "omp_num_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
+        # Team 04's embedding policy (KE2 Kronecker tables or plain): weights mean something else under another
+        # policy even with the same shapes (Mallik's meta field, team 07).
+        "embedding_policy_id": os.environ.get("V5_EMBEDDING_POLICY_ID", "none"),
     }
     return env
 
 
 # Fields that must match to resume. A change in any of them changes the numbers training produces.
 ENV_MUST_MATCH = ("image_digest", "torch", "cuda", "nccl", "config_sha256", "tokenizer_sha", "git_sha",
-                  "omp_num_threads")
+                  "omp_num_threads", "embedding_policy_id")
+# What a field means in a manifest written before the field existed.
+ENV_DEFAULTS = {"embedding_policy_id": "none"}
+
+
+def env_diff(saved: dict, now: dict, keys) -> dict:
+    """{key: [saved, now]} for every key that differs."""
+    return {k: [saved.get(k, ENV_DEFAULTS.get(k)), now.get(k)] for k in keys
+            if saved.get(k, ENV_DEFAULTS.get(k)) != now.get(k)}
+
+
+def load_loader_state(loader, state: dict):
+    """The loader refuses a state from another shard list by raising ValueError (loader contract)."""
+    try:
+        loader.load_state_dict(state)
+    except ValueError as e:
+        raise DataManifestError(f"data loader refused the saved position: {e}") from e
 
 
 def rng_capture() -> dict:
@@ -415,6 +444,7 @@ class Checkpointer:
         self.epoch = None        # this attempt's claim on latest.json (fencing); set by claim()
         self._ptr_ver = None     # version of latest.json this attempt last wrote (S3 ETag)
         self.fenced = False      # rank 0: a commit was refused because a newer attempt took over
+        self._frozen_ref = None  # frozen fingerprints of the last restore or save, for the check at save
         os.makedirs(self.local_run, exist_ok=True)
 
     # ---- paths
@@ -461,6 +491,17 @@ class Checkpointer:
         self.epoch = epoch
         return epoch
 
+    def check_frozen(self, frozen: dict, step: int):
+        """Refuse to save when a frozen tensor changed since the last restore or save (same on every rank: the
+        fingerprints come from one all-reduce)."""
+        ref = self._frozen_ref
+        changed = sorted(k for k in frozen if ref is not None and k in ref and ref[k] != frozen[k])
+        if changed:
+            if rank() == 0:
+                emit("checkpoint.failed", step=step, cause="FrozenChangedError", detail=f"changed: {changed}")
+            raise FrozenChangedError(f"frozen tensors changed since the last checkpoint: {changed}; not saved")
+        self._frozen_ref = dict(frozen)
+
     def any_fenced(self) -> bool:
         """True on every rank if rank 0 had a commit refused (collective: all ranks must call it)."""
         return not all_true(not self.fenced)
@@ -502,6 +543,7 @@ class Checkpointer:
         # rank-0-only call would wait forever for the others.
         digest = state_digest(state)
         frozen = fingerprints(state, {f"model.{k}" for k in self.frozen_keys})
+        self.check_frozen({k[len("model."):]: v for k, v in frozen.items()}, step)
         probe = float_bits(probe_fn(model))
         ld = loader.state_dict()
         loader_global = all_true(json.dumps(ld, sort_keys=True) == broadcast_obj(json.dumps(ld, sort_keys=True)))
@@ -711,7 +753,7 @@ class Checkpointer:
 
         # 2. Environment.
         now = env_manifest(self.config_path)
-        diff = {k: [man["env"].get(k), now.get(k)] for k in ENV_MUST_MATCH if man["env"].get(k) != now.get(k)}
+        diff = env_diff(man["env"], now, ENV_MUST_MATCH)
         if diff and not allow_env_change:
             raise EnvMismatchError(f"environment differs from the checkpoint: {diff}")
 
@@ -749,7 +791,7 @@ class Checkpointer:
         extra_rank = 0 if resharded else rank()  # loader_global: every rank saved the same data position
         with open(os.path.join(local_dir, f"extra_rank{extra_rank}.json")) as f:
             extra = json.load(f)
-        loader.load_state_dict(extra["loader"])
+        load_loader_state(loader, extra["loader"])
         if resharded:
             rng_reseed(self.seed, man["step"], rank())
         else:
@@ -780,6 +822,7 @@ class Checkpointer:
             raise RestoreCheckError(f"step {c['step']}: " + "; ".join(problems or ["check failed on another rank"]))
         checks_s = tc.s()
 
+        self._frozen_ref = dict(man["frozen"])
         if skip:
             loader.add_skip(skip)
         return {"step": man["step"], "tokens": man["tokens"], "branch": c["branch"], "from_path": rel,

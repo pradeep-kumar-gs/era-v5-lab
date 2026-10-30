@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # support/simulation/ holds the trainer package; submission/ holds ckpt/ and common/.
 sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..", "..", "submission")]
 from ckpt.ckpt import (EXIT_DONE, EXIT_FATAL, EXIT_RETRY, Checkpointer, CheckpointError,  # noqa: E402
-                       EnvMismatchError, NonFiniteError, StrictLoadError, float_bits)
+                       EnvMismatchError, FrozenChangedError, NonFiniteError, StrictLoadError, float_bits)
 from common.events import emit  # noqa: E402
 from common.reasons import write_exit_note  # noqa: E402
 from ckpt.ds_ckpt import DSCheckpointer  # noqa: E402
@@ -332,9 +332,9 @@ def main(argv=None) -> int:
             write_exit_note(EXIT_DONE if ok else EXIT_RETRY, "done" if ok else "crash", step,
                             "" if ok else "final checkpoint not committed")
         return EXIT_DONE if ok else EXIT_RETRY
-    except (NonFiniteError, LossSpikeError) as e:
+    except (NonFiniteError, LossSpikeError, FrozenChangedError) as e:
         print(f"FATAL: {e}", file=sys.stderr)
-        cause = "loss_spike" if isinstance(e, LossSpikeError) else "nonfinite"
+        cause = {LossSpikeError: "loss_spike", FrozenChangedError: "FrozenChangedError"}.get(type(e), "nonfinite")
         if rank == 0:
             emit("train.exit", step=step, code=EXIT_FATAL, cause=cause,
                  hint=f"rollback: TRAIN_EXTRA='--from-step <last good> --skip <N> --branch <new>'")

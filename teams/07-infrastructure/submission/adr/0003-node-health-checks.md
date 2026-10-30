@@ -66,6 +66,8 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 - Per GPU, from `nvidia-smi`: temperature; **ECC uncorrectable** (volatile and aggregate) and the correctable
   count (kept for a trend); hardware-slowdown throttle; PCIe link width against max.
 - Row remapping: pending (warn: reset needed) and failure (fail: replace the GPU).
+- **NVLink:** any link `<inactive>` in `nvidia-smi nvlink -s` fails the node. A down link raises no error; it only
+  halves all-reduce speed for the whole run, and without DCGM nothing else would see it (Mallik's check, team 07).
 - `dcgmi diag -r 1` in prolog mode only (the GPUs are idle before a job) and level 2 in `--mode full`. Periodic
   mode, which runs while training uses the GPUs, reads `dcgmi health -c` instead: DCGM's background watches,
   no extra load. NVIDIA advises against `diag` on busy GPUs, and a false diag "fail" would drain the node and
@@ -74,18 +76,23 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 
 | Class | Codes |
 |---|---|
-| **fatal → drain** | 48, 63/64, 74, **79**, **94/95**, 119/120 |
-| **warn** | 13, 31, 43 |
+| **fatal → drain** | 48, 61/62, 63/64, 74, **79**, 92, **95**, 119/120, 140 |
+| **restart** | **94** (contained ECC): NVIDIA says the application restarts and the GPU stays in service, so one 94 is a warning; a second 94 on the same GPU within 24 h drains the node |
+| **warn** | 13, 31, 43 (usually the application, not the GPU) |
 | unknown | reported as warn, never ignored |
 
 - **De-duplication:** a hash of every Xid line already seen is stored per node, so an old Xid does not drain a
   repaired node again.
 - Clock offset (chrony), free NVMe (ADR 0001 §2), available host memory.
-- **All-reduce test** (`health/allreduce_test.py`, `--mode full`): each rank fills an **integer-valued fp32**
-  tensor with `rank + 1`, so the sum `n(n+1)/2` is exact in any reduction order; a wrong value means a fault,
-  not rounding. 5 warm-up and 20 timed iterations, 1 MB to 1 GB. Reports algbw and
-  **busbw = algbw × 2(n−1)/n** (the nccl-tests convention). Fails on a wrong value, a timeout, or busbw below the
-  floor. Without GPUs it uses gloo and says `backend: gloo`.
+- **Collective test** (`health/allreduce_test.py`, `--mode full`): the four collectives training uses
+  (Mallik's set, team 07): **all-reduce** (data-parallel gradients), **reduce-scatter** (ZeRO-2/3, FSDP gradients),
+  **all-gather** (ZeRO-3, FSDP weights) and **all-to-all** (MoE experts). Every value is a small whole number in
+  fp32 (all-reduce: `rank + 1`, sum `n(n+1)/2`; all-to-all: chunk `j` of rank `r` holds `r·n + j`), so the result
+  is exact in any reduction order; a wrong value means a fault, not rounding. 5 warm-up and 20 timed iterations,
+  1 MB to 1 GB. Reports algbw and busbw (nccl-tests convention: ×2(n−1)/n for all-reduce, ×(n−1)/n for the
+  others), one check per collective (`nccl_all_reduce`, …). Fails on a wrong value, a timeout, or busbw below the
+  floor. Without GPUs it uses gloo and says `backend: gloo`. torchrun reports any failed worker as exit 1, so
+  the JSON result, not the exit code, decides.
 
 | Mode | Use | Budget |
 |---|---|---|
@@ -117,6 +124,11 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 - **Periodic mode drains by itself**: Slurm ignores `HealthCheckProgram`'s exit code, so on `fail` the check
   runs `scontrol update state=drain reason=v5:<checks>` and sends SIGUSR1 to the jobs on the node. They save and
   exit 75, and Slurm restarts them on a healthy node (`queue/job_queue.py`).
+- **Full mode reports, the caller drains:** `launch.sh` drains a node whose `--mode full` fails, with reason
+  `health: <checks>` (found while planning the merge: it used to report the node as drained without draining it).
+- **Slurm starts the prolog and health program with a bare environment.** Both scripts set a full `PATH` first;
+  without it, a tool in `/usr/local/bin` is "not found" and its checks report `skipped` instead of failing
+  (found by the Docker drill `health_fakes`).
 
 > **In simple words.** "Drain" means "no new work for this node". The job already there is asked to save
 > first, so moving it costs seconds, not the work since the last checkpoint.
@@ -172,7 +184,7 @@ All health metrics with LOW / MEDIUM / HIGH thresholds are H-01 … H-24 in `met
 | H-08 | GPU at its slowdown temperature | 0 °C margin |
 | H-11 | NVLink / EFA link down | any |
 | H-12 | All-reduce busbw | ≤ 0.7 × baseline |
-| H-13 | All-reduce wrong sum | any |
+| H-13 | Collective wrong value (any of the four) | any |
 | H-14 | Step watchdog | ≥ 2 per hour |
 | H-15 | Straggler ratio | ≥ 1.25 |
 | H-16 | NCCL timeouts | ≥ 2 per hour |
@@ -209,7 +221,11 @@ Bad and accepted:
 | same | nvidia-smi fixture: ECC uncorrectable → fail, hot + throttled → warn, x8 of x16 → warn | pass |
 | same | no nvidia-smi on a GPU node → `skipped`, required → verdict `warn` (never pass); on a CPU node → pass | pass |
 | same | prolog warn exits 0; periodic warn exits 3; forced fail exits 4 with drain reason; JSON keys match the schema | pass |
-| same | all-reduce on gloo with 2 ranks: exact sums, busbw > 0 | pass |
+| same | four collectives on gloo with 2 and 3 ranks: exact values, busbw > 0; a corrupted all-to-all fails only `nccl_all_to_all` | pass |
+| same | Xid 94 once → warn; again on the same GPU within 24 h → fail; after 25 h → warn; Xid 61 → fail | pass |
+| same | NVLink: one `<inactive>` link → fail; all up → pass; no NVLink (PCIe card) → skipped | pass |
+| Docker Slurm, fake `nvidia-smi`/`dmesg` (Mallik's fakes) | GPU checks run on every GPU node and pass; planted hot GPU, ECC, row-remap failure, NVLink down, Xid 79 → fail on the right check; Xid 94 → warn; NVLink down is drained by the periodic check (`v5:nvlink`) | pass (drills `health_gpu_checks_run`, `health_planted_faults`, `health_nvlink_drains_node`) |
+| `launch.sh` against Docker | NVLink down on one node: full check fails, node drained `health: nvlink`, launch goes on with 2 of 3 | pass |
 | Docker Slurm (`support/simulation/run_sim.py`) | forced `fail` on a main-run node: periodic check drains it, job saves, exits 75 and moves to the spare | pass: detect 26 s, 0 steps lost, MTTR 31 s ([sim_results.md](../../support/docs/sim_results.md)) |
 | Docker Slurm | forced `fail` on **both** main-run nodes with one spare: both drained, main run waits (no crash loop), recovers when they return | see [sim_results.md](../../support/docs/sim_results.md) |
 | Docker Slurm | `SIGSTOP` on one rank: the watchdog on the other ranks exits 75 with a stack dump; job restarts | pass: watchdog at 20 s, MTTR 24 s ([sim_results.md](../../support/docs/sim_results.md)) |

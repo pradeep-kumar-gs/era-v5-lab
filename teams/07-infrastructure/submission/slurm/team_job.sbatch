@@ -3,6 +3,10 @@
 #   sbatch --account=arch --export=ALL,RUN_ID=ladder-1 team_job.sbatch
 # It can be preempted by the main run at any time; it saves on SIGTERM and is requeued, so the team
 # loses at most the work since its last save.
+# Time limit: Slurm sends SIGUSR1 to this script 300 s before --time runs out (B: only the batch shell). The
+# wrapper passes it to the trainers, they save and exit 75, and Slurm requeues the job with the same id, so a
+# long job runs in segments and loses nothing (Max's self-requeue, team 07). Set the lead to at least
+# 2 x the save time + 60 s. A longer --time than the QOS MaxWall is refused at submit.
 #SBATCH --job-name=v5-team
 #SBATCH --qos=normal
 #SBATCH --partition=gpu
@@ -10,6 +14,8 @@
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-node=8
 #SBATCH --requeue
+#SBATCH --time=04:00:00
+#SBATCH --signal=B:USR1@300
 #SBATCH --open-mode=append
 #SBATCH --output=/var/log/v5/logs/%x-%j.out
 set -u

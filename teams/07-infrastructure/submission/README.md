@@ -76,7 +76,7 @@ cp cluster.env.example /etc/v5/cluster.env     # hosts, store, run id (no secret
 | slurmctld | primary and backup controller UP (`scontrol ping`) |
 | accounts | `setup_accounts.sh`; the submit user has the `mainrun` association |
 | slurmd | every GPU node registered (a node drained on purpose stays drained) |
-| health | `health_check.py --mode full` on every node at once; a failing node drains itself; fewer healthy nodes than `V5_MIN_NODES` stops the launch |
+| health | `health_check.py --mode full` on every node at once (GPUs, ECC, row remap, NVLink, Xid, NVMe, the four collectives); launch drains a failing node with reason `health: <checks>`; fewer healthy nodes than `V5_MIN_NODES` stops the launch |
 | services | hot-spare timer and alert watcher on the controllers, spot watcher on every node (systemd units in `slurm/`) |
 | store | `ckpt.py probe-store`: write, read, and **a stale write refused**. Fencing (ADR 0001 §3) depends on it; an S3 endpoint that ignores `If-Match` stops the launch here |
 | submit | main run submitted unless already queued; it claimed its epoch, restored and started |

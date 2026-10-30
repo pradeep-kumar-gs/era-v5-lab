@@ -5,9 +5,9 @@ and later continue from exactly that place. Teams 01/02 own the real loader; thi
 on it. Our synthetic loader passes it today (see test at the bottom).
 
 A loader must offer:
-    state_dict()        -> JSON-serialisable dict: ONE global ledger offset and the skip list, the same on
-                           every rank (no per-rank or per-worker positions; derive those from the offset)
-    load_state_dict(d)  -> continue from that state
+    state_dict()        -> JSON-serialisable dict: ONE global ledger offset, the skip list and "manifest" (sha256 of
+                           the shard list), the same on every rank (no per-rank or per-worker positions)
+    load_state_dict(d)  -> continue from that state; raise ValueError if d["manifest"] is not this loader's data
     next_batch_id()     -> {"position": ..., "sha256": <hash of the next batch's content>}, without consuming it
     next()              -> the next batch (tensor or anything hashable via bytes)
     add_skip(n)         -> skip the next n batches (rollback)
@@ -66,6 +66,14 @@ def check(factory, steps=20, cut=7, world=2) -> list:
         skipped = [hashlib.sha256(_bytes(d.next())).hexdigest() for _ in range(3)]
         if skipped != straight[cut + 2:cut + 5]:
             problems.append(f"rank {r}: add_skip(2) does not skip exactly the next 2 batches")
+        if not isinstance(st.get("manifest"), str) or not st["manifest"]:
+            problems.append(f"rank {r}: state_dict has no \"manifest\" (sha256 of the shard list)")
+        else:
+            try:
+                factory(r, world).load_state_dict(dict(st, manifest="0" * 64))
+                problems.append(f"rank {r}: load_state_dict accepted a state saved on another data manifest")
+            except ValueError:
+                pass
         states.append(json.dumps(st, sort_keys=True))
     if len(set(states)) > 1:
         problems.append("state_dict differs between ranks at the same step: it must be one global ledger "
