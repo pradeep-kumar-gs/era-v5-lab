@@ -1,5 +1,8 @@
 # Team 07: Pradeep's and Mallik's work compared, and one merged submission
 
+> **Superseded for decisions by [team07_merge_plan.md](team07_merge_plan.md)** (Pradeep + Mallik + Max in one
+> page). This file stays as the detailed review behind it.
+
 Compared: this repo (`pradeep-kumar-gs/era-v5-lab`, branch `infrastructure`, commit `fd0f59b`) and Mallik's
 (`millermuttu/era-v5-lab`, branch `07-infrastructure`, commit `c6e38a3`, 28 Oct 2026). Written 30 Oct 2026.
 

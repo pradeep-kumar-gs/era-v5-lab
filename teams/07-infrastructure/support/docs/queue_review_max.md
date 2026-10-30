@@ -1,5 +1,8 @@
 # Queue deep review: Max's repo next to ours and Mallik's
 
+> **Superseded for decisions by [team07_merge_plan.md](team07_merge_plan.md)** (Pradeep + Mallik + Max in one
+> page). This file stays as the detailed review behind it.
+
 Reviewed: `uz9ai/queue` (branch `main`, last push 28 Oct 2026), the "X" source (`max_queue-main`) in the G7
 review. Compared with this repo (`fd0f59b`/`38538cb`, "P") and Mallik's `millermuttu/era-v5-lab`
 (`07-infrastructure`, "M"). Written 30 Oct 2026. Target, as agreed: **the TSAI shared GPU node(s)**.
