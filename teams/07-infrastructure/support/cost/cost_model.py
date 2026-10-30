@@ -111,7 +111,7 @@ def table(rows, cols):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prices", default=os.path.join(HERE, "..", "..", "submission", "metrics", "prices.yaml"))
+    ap.add_argument("--prices", default=os.path.join(HERE, "..", "..", "metrics", "prices.yaml"))
     ap.add_argument("--measured", help="metrics.json from the simulation: uses its measured MTTR")
     ap.add_argument("--out", default=os.path.join(HERE, "cost_report.md"))
     a = ap.parse_args()

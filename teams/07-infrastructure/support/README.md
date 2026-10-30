@@ -1,6 +1,6 @@
 # Support (optional): the evidence behind the submission
 
-**Not needed to read, use or review the design.** The submission is [`../submission/`](../submission/README.md).
+**Not needed to read, use or review the design.** The submission is the topic folders next to this one ([`../README.md`](../README.md)).
 This folder holds what we used to **prove** it: tests, a Docker copy of the Slurm cluster with drills, a tiny
 test trainer, GPU checks for Kaggle, the cost model, and generated reports.
 
@@ -34,12 +34,12 @@ docker run --rm -v "$PWD":/opt/v5:ro --entrypoint bash v5-slurm-sim:1 -c '
 # 3. the full Docker Slurm simulation, every drill (~25 min); ends with "N/N drills passed"
 python3 support/simulation/run_sim.py      # results in support/simulation/results/, summary in support/docs/sim_results.md
 
-# 4. cost model (prices are assumptions until submission/metrics/prices.yaml is checked)
+# 4. cost model (prices are assumptions until metrics/prices.yaml is checked)
 docker run --rm -v "$PWD":/opt/v5 --entrypoint bash v5-slurm-sim:1 \
   -c 'cd /opt/v5 && python support/cost/cost_model.py --measured support/simulation/results/metrics.json'
 
-# after editing submission/metrics/catalog.yaml or submission/common/reasons.py, regenerate the pages
-docker run --rm -v "$PWD":/opt/v5 --entrypoint bash v5-slurm-sim:1 -c 'cd /opt/v5/submission &&
+# after editing metrics/catalog.yaml or common/reasons.py, regenerate the pages
+docker run --rm -v "$PWD":/opt/v5 --entrypoint bash v5-slurm-sim:1 -c 'cd /opt/v5 &&
   python metrics/evaluate.py --render-md ../support/docs/metrics_catalog.md &&
   python metrics/explain.py --all ../support/docs/codes_and_actions.md'
 ```
@@ -55,6 +55,6 @@ the code can report a cause that has no plain-words explanation.
 - [ ] Every decision in ADR 0001–0004 has an "In simple words" box a non-infra student can follow.
 - [ ] Each item in `docs/review_week1.md` is marked fixed / tested / open, with a reason.
 - [ ] Unit tests pass (steps 1–2); the simulation passes if you run it (step 3).
-- [ ] Every HIGH alert and every exit-78 cause says what to do (`submission/metrics/README.md`, `docs/codes_and_actions.md`).
-- [ ] `submission/metrics/prices.yaml` is checked against the AWS pricing page before any dollar figure is used.
+- [ ] Every HIGH alert and every exit-78 cause says what to do (`metrics/README.md`, `docs/codes_and_actions.md`).
+- [ ] `metrics/prices.yaml` is checked against the AWS pricing page before any dollar figure is used.
 - [ ] Open points in each ADR have an owner and a date.

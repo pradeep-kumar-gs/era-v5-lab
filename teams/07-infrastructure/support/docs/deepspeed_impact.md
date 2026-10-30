@@ -206,7 +206,7 @@ a successful restore and **overwrite good checkpoints** with an untrained model.
 rank's file after the commit, then restore. It must fall back to the previous commit, never start at step 0.
 
 **Measured (DeepSpeed 0.19.8, 29 Oct):** with the weights file missing, `load_checkpoint` does not return None,
-it fails an `assert` (`AssertionError`). So `submission/ckpt/ds_ckpt.py` treats both the same way: None *or* an
+it fails an `assert` (`AssertionError`). So `ckpt/ds_ckpt.py` treats both the same way: None *or* an
 exception from `load_checkpoint` becomes `IntegrityError`, and restore tries the previous commit. T19 passes.
 
 ### 1.8 Security: checkpoints are now pickles
@@ -260,7 +260,7 @@ to hold: `engine.skipped_steps` grows on overflow. Track it (§4).
 
 ### 1.12 Built and measured (29 Oct)
 
-The plan above is now code: `submission/ckpt/ds_ckpt.py` (`DSCheckpointer`, `export_ds`), `train.py --deepspeed
+The plan above is now code: `ckpt/ds_ckpt.py` (`DSCheckpointer`, `export_ds`), `train.py --deepspeed
 --zero-stage {0,1,2,3} --ds-precision {fp32,fp16,bf16}`, and tests T18–T23 in `support/tests/test_ckpt.py`.
 The [verify] above about CPU is **answered: wrong.** DeepSpeed's CPU accelerator works with plain gloo (0.18.0 in
 the cluster image, 0.19.8 on a Mac), so the Docker cluster runs every drill with the DeepSpeed trainer too:

@@ -1,4 +1,4 @@
-"""The queue file (submission/queue/job_queue.py) and the paths the cluster uses (ADR 0002)."""
+"""The queue file (queue/job_queue.py) and the paths the cluster uses (ADR 0002)."""
 import glob
 import os
 import re
@@ -6,7 +6,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEAM = os.path.join(HERE, "..", "..")
-sys.path[:0] = [os.path.join(TEAM, "submission"), os.path.join(TEAM, "submission", "queue")]
+sys.path[:0] = [TEAM, os.path.join(TEAM, "queue")]
 import job_queue  # noqa: E402
 
 
@@ -83,10 +83,10 @@ def test_default_trainer_exists():
 
 def test_every_cluster_path_exists():
     """/opt/v5 is the team folder in every container. A moved file must not leave a dangling path behind."""
-    files = glob.glob(os.path.join(TEAM, "submission", "slurm", "*")) + \
+    files = glob.glob(os.path.join(TEAM, "slurm", "*")) + \
         glob.glob(os.path.join(TEAM, "support", "simulation", "slurm-docker", "*")) + \
         [os.path.join(TEAM, "support", "simulation", "run_sim.py")]
-    planned = {"submission/slurm/ec2_suspend.sh", "submission/slurm/ec2_resume.sh"}   # week 2, need AWS
+    planned = {"slurm/ec2_suspend.sh", "slurm/ec2_resume.sh"}   # week 2, need AWS
     missing = set()
     for f in files:
         for p in re.findall(r"/opt/v5/([\w./-]+\.(?:py|sh|sbatch|conf))", open(f).read()):

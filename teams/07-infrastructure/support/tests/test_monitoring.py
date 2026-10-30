@@ -12,7 +12,7 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..", "..")                    # the team folder
-SUB = os.path.join(ROOT, "submission")
+SUB = ROOT
 sys.path[:0] = [SUB, os.path.join(SUB, "queue")]
 import ckpt.ckpt as ck  # noqa: E402
 import job_queue  # noqa: E402
@@ -35,15 +35,15 @@ def test_every_checkpoint_error_is_explained():
 
 
 def test_every_emitted_cause_is_explained():
-    found = set(re.findall(r'cause="([a-z_]+)"', src("submission", "ckpt", "ckpt.py")))
+    found = set(re.findall(r'cause="([a-z_]+)"', src("ckpt", "ckpt.py")))
     found |= set(re.findall(r'"(loss_spike|nonfinite|hang_watchdog|saved_and_stopped|done|crash)"',
                             src("support", "simulation", "trainer", "train.py")))
-    found |= {"crash", "crash_loop", "unknown_fatal"}            # submission/queue/job_queue.py
+    found |= {"crash", "crash_loop", "unknown_fatal"}            # queue/job_queue.py
     assert found - set(reasons.CAUSES) == set()
 
 
 def test_every_drain_reason_is_explained():
-    hc = src("submission", "health", "health_check.py")
+    hc = src("health", "health_check.py")
     can_fail = {n for n in re.findall(r'check\("([a-z_]+)", "fail"', hc)}
     can_fail |= {"gpu_count", "ecc_uncorrectable", "remapped_rows", "xid", "dcgm_diag", "gpu_temperature",
                  "nvme_free", "clock_offset", "nccl_collectives", "drill_force_fail", "spot_notice",

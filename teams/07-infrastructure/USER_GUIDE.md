@@ -56,11 +56,11 @@ the Docker test cluster unless the text says otherwise.
 
 | Part | Folder | Decision record |
 |---|---|---|
-| Checkpoint: save, commit, restore, prove, export, retention | `submission/ckpt/` | ADR 0001 |
-| Queue: Slurm config, accounts and limits, job scripts, the wrapper | `submission/slurm/`, `submission/queue/` | ADR 0002 |
-| Node health: GPU checks, Xid scan, NVLink, collectives, drain | `submission/health/` | ADR 0003 |
-| Monitoring and cost: events, 74 metrics, alerts, explanations | `submission/metrics/`, `submission/common/` | ADR 0004 |
-| Start-up of the whole stack, in order | `submission/launch.sh` | ADR 0002 §11 |
+| Checkpoint: save, commit, restore, prove, export, retention | `ckpt/` | ADR 0001 |
+| Queue: Slurm config, accounts and limits, job scripts, the wrapper | `slurm/`, `queue/` | ADR 0002 |
+| Node health: GPU checks, Xid scan, NVLink, collectives, drain | `health/` | ADR 0003 |
+| Monitoring and cost: events, 74 metrics, alerts, explanations | `metrics/`, `common/` | ADR 0004 |
+| Start-up of the whole stack, in order | `ops/launch.sh` | ADR 0002 §11 |
 
 ### 1.2 The life of the main run
 
@@ -153,11 +153,11 @@ folders, `step_<N>-e<epoch>`, so two attempts never mix files.
 ```bash
 # a training-style job with automatic save/restart (the template every team should copy)
 sbatch --account=arch --export=ALL,RUN_ID=ladder-350m,STEPS=20000,INTERVAL_S=600 \
-       /opt/v5/submission/slurm/team_job.sbatch
+       /opt/v5/slurm/team_job.sbatch
 
 # your own script with the same save/restart behaviour
 sbatch --account=arch --export=ALL,RUN_ID=my-run,V5_TRAIN_SCRIPT=/path/to/train.py \
-       /opt/v5/submission/slurm/team_job.sbatch
+       /opt/v5/slurm/team_job.sbatch
 
 # a quick check on one GPU, ahead of the queue
 sbatch --account=arch --qos=debug -p debug --time=00:10:00 --gpus-per-node=1 --wrap 'nvidia-smi; python -c "import torch"'
@@ -204,9 +204,9 @@ Options your job reads (`--export=ALL,KEY=value`):
 squeue -u $USER                          # state and pending reason
 scontrol show job <id> | grep -E 'JobState|Restarts|Comment'   # Comment = plain-words status from the wrapper
 sacct -X -j <id> -o jobid,state,exitcode,restarts,elapsed,alloctres
-python /opt/v5/submission/queue/job_queue.py status               # every job and drained node, in plain words
-python /opt/v5/submission/metrics/explain.py 78                  # or 75, AssocGrpGRES, FencedError, CK-05, nvlink ...
-python /opt/v5/submission/ckpt/ckpt.py list --run s3://<bucket>/<prefix>/<RUN_ID>   # committed checkpoints
+python /opt/v5/queue/job_queue.py status               # every job and drained node, in plain words
+python /opt/v5/metrics/explain.py 78                  # or 75, AssocGrpGRES, FencedError, CK-05, nvlink ...
+python /opt/v5/ckpt/ckpt.py list --run s3://<bucket>/<prefix>/<RUN_ID>   # committed checkpoints
 ```
 
 ---
@@ -318,7 +318,7 @@ The loader must offer:
 Prove it before the main run:
 
 ```bash
-python /opt/v5/submission/ckpt/loader_contract.py --factory mypkg.loader:make_loader   # make_loader(rank, world)
+python /opt/v5/ckpt/loader_contract.py --factory mypkg.loader:make_loader   # make_loader(rank, world)
 ```
 
 Why one global offset: after a node is lost the run may continue on fewer GPUs, and every new rank then gets the
@@ -353,10 +353,10 @@ export_safetensors("s3://<bucket>/<prefix>/<run>", model_factory, probe_fn, "/tm
 ### 5.1 Daily look
 
 ```bash
-python /opt/v5/submission/queue/job_queue.py status    # jobs and drained nodes, plain words
+python /opt/v5/queue/job_queue.py status    # jobs and drained nodes, plain words
 sinfo -R                                               # drained nodes and why (v5:<check> or health: <check>)
-python /opt/v5/submission/ckpt/ckpt.py list --run <run> | tail -3
-python /opt/v5/submission/metrics/explain.py <anything you do not recognise>
+python /opt/v5/ckpt/ckpt.py list --run <run> | tail -3
+python /opt/v5/metrics/explain.py <anything you do not recognise>
 ```
 
 Alerts arrive through Team 08's pager or the webhook in `V5_ALERT_WEBHOOK`; each carries the metric id
@@ -401,9 +401,9 @@ Xid 94 (contained ECC) alone is only a warning: the job restarts, the GPU stays.
 ### 5.4 Rolling back after a NaN or a loss spike
 
 ```bash
-python /opt/v5/submission/ckpt/ckpt.py list --run <run>          # pick the last good step K
+python /opt/v5/ckpt/ckpt.py list --run <run>          # pick the last good step K
 scancel <held job id>
-sbatch --export=ALL,TRAIN_EXTRA="--from-step K --skip 5 --branch b1" /opt/v5/submission/slurm/mainrun.sbatch
+sbatch --export=ALL,TRAIN_EXTRA="--from-step K --skip 5 --branch b1" /opt/v5/slurm/mainrun.sbatch
 ```
 
 The run continues on branch `b1` from step K, skipping the 5 batches after it. The old branch stays readable.
@@ -426,12 +426,12 @@ The run continues on branch `b1` from step K, skipping the 5 batches after it. T
 ### 6.1 Start everything in order
 
 ```bash
-cp /opt/v5/submission/cluster.env.example /etc/v5/cluster.env      # hosts, store, run id; no secrets
+cp /opt/v5/ops/cluster.env.example /etc/v5/cluster.env      # hosts, store, run id; no secrets
 $EDITOR /etc/v5/cluster.env
-/opt/v5/submission/launch.sh --list        # the 12 steps
-/opt/v5/submission/launch.sh --dry-run     # what would run where
-/opt/v5/submission/launch.sh               # start; stops at the first failed step
-/opt/v5/submission/launch.sh --from health # continue after a fix
+/opt/v5/ops/launch.sh --list        # the 12 steps
+/opt/v5/ops/launch.sh --dry-run     # what would run where
+/opt/v5/ops/launch.sh               # start; stops at the first failed step
+/opt/v5/ops/launch.sh --from health # continue after a fix
 ```
 
 | Step | Proves before going on |
@@ -460,7 +460,7 @@ Manager), S3 access is the instance role, the munge key is copied by hand or fro
 | GPUs per node | `thresholds.yaml: expect_gpus` or `V5_EXPECT_GPUS` in `/etc/v5/node.env` | the node's count |
 | Collective size in the full check | `V5_COLL_MAX_MB` (default 1024 on GPU) | default |
 | Checkpoint store | `V5_REMOTE_ROOT` | the bucket TSAI gives |
-| Thresholds (temperature, ECC, busbw floor, Xid classes) | `submission/health/thresholds.yaml` | vendor limits until the week-2 baseline (5 × `--mode full`) |
+| Thresholds (temperature, ECC, busbw floor, Xid classes) | `health/thresholds.yaml` | vendor limits until the week-2 baseline (5 × `--mode full`) |
 
 ### 6.3 Health checks by hand
 
@@ -482,7 +482,7 @@ healthy node). A missing tool is `skipped`, never `pass`.
 ```text
 teams/07-infrastructure/
 ├── USER_GUIDE.md          this file
-├── submission/            what runs on the cluster (ADRs, launch.sh, ckpt, queue, slurm, health, metrics, common)
+├── adr/ ckpt/ queue/ slurm/ health/ metrics/ common/ ops/   what runs on the cluster
 └── support/
     ├── tests/             unit tests (pytest)
     ├── simulation/        Docker Slurm cluster + drills (run_sim.py), test trainer, results*/
@@ -500,7 +500,7 @@ python -m pytest -q tests/                              # ~17 min on a laptop (2
 V5_S3_ENDPOINT=http://127.0.0.1:9000 V5_TEST_REMOTE=s3://v5-ckpt python -m pytest -q tests/test_ckpt.py
 ```
 
-Checkpoint tests T1–T30 are listed in `submission/ckpt/README.md` §10; DeepSpeed tests (T18–T23) need
+Checkpoint tests T1–T30 are listed in `ckpt/README.md` §10; DeepSpeed tests (T18–T23) need
 `pip install deepspeed`.
 
 ### 7.2 The Docker Slurm simulation

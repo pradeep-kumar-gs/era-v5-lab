@@ -4,7 +4,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..", "submission")]
+sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..")]
 from cost import cost_model, find_unmanaged  # noqa: E402
 
 

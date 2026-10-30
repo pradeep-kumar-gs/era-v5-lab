@@ -43,7 +43,7 @@ printf '%s\n' "export V5_EVENTS_DIR=/s3/events" "export V5_EXPECT_GPUS=$gpus" "e
 
 # Slurm reads its config from /etc/slurm; the files come from the repo, read-only.
 mkdir -p /etc/slurm
-cp /opt/v5/submission/slurm/slurm.conf /opt/v5/support/simulation/slurm-docker/nodes.conf /opt/v5/support/simulation/slurm-docker/cgroup.conf \
+cp /opt/v5/slurm/slurm.conf /opt/v5/support/simulation/slurm-docker/nodes.conf /opt/v5/support/simulation/slurm-docker/cgroup.conf \
    /opt/v5/support/simulation/slurm-docker/site.conf /opt/v5/support/simulation/slurm-docker/gres.conf /etc/slurm/
 install -o slurm -g slurm -m 600 /opt/v5/support/simulation/slurm-docker/slurmdbd.conf /etc/slurm/slurmdbd.conf
 
@@ -61,7 +61,7 @@ case "$role" in
   slurmd)
     until (echo > /dev/tcp/slurmctld/6817) 2>/dev/null; do sleep 1; done
     # The spot-notice watcher runs on every node (ADR 0002 §5). In the test it reads a file, not EC2 IMDS.
-    nohup python3 /opt/v5/submission/queue/job_queue.py spot-watch >/var/log/slurm/spot_watcher.log 2>&1 &
+    nohup python3 /opt/v5/queue/job_queue.py spot-watch >/var/log/slurm/spot_watcher.log 2>&1 &
     touch /dev/v5gpu0 /dev/v5gpu1          # placeholder GPU devices for gres.conf (Docker test only)
     # No systemd in the container (cgroup.conf IgnoreSystemd=yes): make the slice slurmd expects.
     mkdir -p /sys/fs/cgroup/system.slice

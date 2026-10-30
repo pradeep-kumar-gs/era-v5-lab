@@ -1,7 +1,7 @@
 # Simulation kit (optional): how we proved the design without paying for GPUs
 
 **You do not need this folder to use or review the design.** The submission is the ADRs, the READMEs and the
-production code in `submission/` (`ckpt/`, `queue/`, `slurm/`, `health/`, `metrics/`, `common/`). This folder holds what we
+production code in the team folder (`ckpt/`, `queue/`, `slurm/`, `health/`, `metrics/`, `common/`). This folder holds what we
 used to **prove** it: a Docker copy of the Slurm cluster, a tiny test trainer, the drill script with its
 results. The Kaggle GPU checks are next door in `../kaggle/`. Use it to re-run the evidence, or leave it alone.
 

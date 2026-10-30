@@ -55,11 +55,11 @@ would pass without testing anything. The Docker image now pins `boto3==1.35.99` 
 
 ## Production start order
 
-`submission/launch.sh` starts the stack in order (munge → slurmdbd → DB backup with test restore → controllers →
+`ops/launch.sh` starts the stack in order (munge → slurmdbd → DB backup with test restore → controllers →
 accounts → slurmd → full health on every node → services → checkpoint-store probe → main run → status), checks
 each step and stops on the first failure. The store probe refuses an S3 endpoint that ignores `If-Match`, so
 fencing cannot silently be off in production. Tested against the Docker cluster, including a drained node, too
-few healthy nodes and a second launch. See `submission/README.md` "Starting production".
+few healthy nodes and a second launch. See `README.md` "Starting production".
 
 ## Where the review is right, and what stays open
 

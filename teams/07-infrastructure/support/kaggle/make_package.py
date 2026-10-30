@@ -6,7 +6,7 @@ If the notebook has Internet on and no Dataset is attached, it clones the pushed
 
     python support/kaggle/make_package.py            # from teams/07-infrastructure
 Writes support/kaggle/dist/ (ignored by git; zips are not allowed in the repo):
-    v5-infra-kaggle.zip       the team folder: submission/ + support/ (no results, no caches)
+    v5-infra-kaggle.zip       the team folder: the topic folders + support/ (no results, no caches)
     v5_gpu_checks.ipynb       the notebook (a copy is kept next to this script)
 """
 import json
@@ -62,7 +62,7 @@ from the `infrastructure` branch on GitHub. Results land in `/kaggle/working/gpu
 import glob, os, shutil, subprocess
 WORK = "/kaggle/working/{TOP}"
 shutil.rmtree(WORK, ignore_errors=True)
-hits = glob.glob("/kaggle/input/**/{TOP}/submission/README.md", recursive=True)
+hits = glob.glob("/kaggle/input/**/{TOP}/README.md", recursive=True)
 zips = glob.glob("/kaggle/input/**/v5-infra-kaggle.zip", recursive=True)
 if hits:
     shutil.copytree(os.path.dirname(os.path.dirname(hits[0])), WORK)   # /kaggle/input is read-only

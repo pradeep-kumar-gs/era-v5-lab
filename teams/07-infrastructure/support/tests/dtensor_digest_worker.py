@@ -7,7 +7,7 @@ import sys
 import torch
 import torch.distributed as dist
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "submission"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from ckpt.ckpt import state_digest  # noqa: E402
 
 try:

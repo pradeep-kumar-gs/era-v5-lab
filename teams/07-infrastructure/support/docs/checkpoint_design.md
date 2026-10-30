@@ -1,7 +1,7 @@
 # Checkpoint design (V5 main run)
 
 Team 07, Infrastructure. Status: **draft for review**, week 1.
-Code: [`../ckpt/ckpt.py`](../../submission/ckpt/ckpt.py), tests [`../ckpt/test_ckpt.py`](../tests/test_ckpt.py). Related: [ADR 0001](../../submission/adr/0001-checkpoint-format-and-commit.md) (decisions, contracts, metrics; it wins where this draft differs), [ADR 0002](../../submission/adr/0002-job-queue-slurm.md) (queue) and `../health/`.
+Code: [`../ckpt/ckpt.py`](../../ckpt/ckpt.py), tests [`../ckpt/test_ckpt.py`](../tests/test_ckpt.py). Related: [ADR 0001](../../adr/0001-checkpoint-format-and-commit.md) (decisions, contracts, metrics; it wins where this draft differs), [ADR 0002](../../adr/0002-job-queue-slurm.md) (queue) and `../health/`.
 
 ## 1. Goal
 

@@ -94,7 +94,7 @@ def main():
     # 2. health check: prolog (quick) and full (adds DCGM if present and the all-reduce sweep)
     for mode in ("prolog", "full"):
         out = os.path.join(OUT, f"health_{mode}.json")
-        r, _ = run(f"health_{mode}", [PY, "submission/health/health_check.py", "--mode", mode, "--report-only", "--out", out],
+        r, _ = run(f"health_{mode}", [PY, "health/health_check.py", "--mode", mode, "--report-only", "--out", out],
                    900, base)
         rep = load(out) or {}
         r["result"] = {"verdict": rep.get("verdict"), "runtime_s": rep.get("runtime_seconds"),
@@ -105,7 +105,7 @@ def main():
     # 3. all-reduce across all GPUs; if NCCL peer-to-peer hangs on this host, retry without it
     out = os.path.join(OUT, "allreduce.json")
     cmd = [PY, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={max(ngpu, 1)}",
-           "submission/health/allreduce_test.py", "--max-mb", "1024", "--out", out]
+           "health/allreduce_test.py", "--max-mb", "1024", "--out", out]
     r, _ = run("allreduce", cmd, 300, base)
     if r["exit"] != 0:
         r2, _ = run("allreduce_p2p_off", cmd, 300, dict(base, NCCL_P2P_DISABLE="1"))

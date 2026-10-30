@@ -21,7 +21,7 @@ from pytest import fixture
 parametrize = pytest.mark.parametrize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUB = os.path.join(HERE, "..", "..", "submission")       # the code under test
+SUB = os.path.join(HERE, "..", "..")                     # the team folder: the code under test
 SIM = os.path.join(HERE, "..", "simulation")             # the tiny test trainer
 sys.path[:0] = [SUB, SIM]
 from ckpt.ckpt import (Checkpointer, StrictLoadError, export_safetensors, run_retention, run_url)  # noqa: E402

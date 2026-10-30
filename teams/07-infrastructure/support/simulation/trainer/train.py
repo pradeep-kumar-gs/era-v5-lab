@@ -26,8 +26,8 @@ import torch.distributed as dist
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# support/simulation/ holds the trainer package; submission/ holds ckpt/ and common/.
-sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..", "..", "submission")]
+# support/simulation/ holds the trainer package; the team folder holds ckpt/ and common/.
+sys.path[:0] = [os.path.join(HERE, ".."), os.path.join(HERE, "..", "..", "..")]
 from ckpt.ckpt import (EXIT_DONE, EXIT_FATAL, EXIT_RETRY, Checkpointer, CheckpointError,  # noqa: E402
                        EnvMismatchError, FrozenChangedError, NonFiniteError, StrictLoadError, float_bits)
 from common.events import emit  # noqa: E402

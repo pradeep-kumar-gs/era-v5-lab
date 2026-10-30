@@ -137,7 +137,7 @@ test trainer uses DDP (every rank holds a full copy) and the Docker cluster shar
 | E2 | What does exit 137, `IntegrityError` or `v5:xid` mean? | `python metrics/explain.py <anything>`; all on one page in [codes_and_actions.md](codes_and_actions.md) | FIXED + TESTED |
 | E3 | Does a page say what to do? | every alert carries why, action, response time, owner, and the explain command | FIXED + TESTED (live alerts) |
 | E4 | Can a new cause be added without an explanation? | no: `support/tests/test_monitoring.py` fails | FIXED + TESTED |
-| E5 | How does Team 08 consume it? | events (JSON lines), the webhook, `metrics.json`; guide and dashboard panels in [metrics/README.md](../../submission/metrics/README.md) | DECIDED; their store and pager are Team 08's |
+| E5 | How does Team 08 consume it? | events (JSON lines), the webhook, `metrics.json`; guide and dashboard panels in [metrics/README.md](../../metrics/README.md) | DECIDED; their store and pager are Team 08's |
 
 ### D. Evidence quality
 

@@ -87,7 +87,7 @@ def sbatch(script, env=None, args="", user="svc"):
 def job(jid) -> dict:
     out = ctl(f"scontrol show job -o {jid}").stdout
     d = dict(re.findall(r"(\w+)=(\S*)", out))
-    m = re.search(r"Comment=(.*?)(?= \w+=|$)", out)   # the plain-words status from submission/queue/job_queue.py (has spaces)
+    m = re.search(r"Comment=(.*?)(?= \w+=|$)", out)   # the plain-words status from queue/job_queue.py (has spaces)
     if m:
         d["Comment"] = m.group(1)
     return d
@@ -107,7 +107,7 @@ def events() -> list:
 
 def emit(event, **fields):
     args = json.dumps(fields)
-    out = ctl(f"RUN_ID={RUN} V5_EVENTS_DIR=/s3/events {PY} -c \"import sys,json; sys.path.insert(0,'/opt/v5/submission'); "
+    out = ctl(f"RUN_ID={RUN} V5_EVENTS_DIR=/s3/events {PY} -c \"import sys,json; sys.path.insert(0,'/opt/v5'); "
               f"from common.events import emit; print(emit('{event}', **json.loads(sys.argv[1]))['time'])\" '{args}'")
     return out.stdout.strip()
 
@@ -117,7 +117,7 @@ def mark(drill, **fields):
 
 
 def latest(run=RUN) -> dict:
-    out = ctl(f". /etc/v5/node.env; {PY} -c \"import sys,json; sys.path.insert(0,'/opt/v5/submission'); "
+    out = ctl(f". /etc/v5/node.env; {PY} -c \"import sys,json; sys.path.insert(0,'/opt/v5'); "
               f"from ckpt.store import open_store; print(json.dumps(open_store('{REMOTE}/{run}').get_json('latest.json')))\"")
     return json.loads(out.stdout)
 
@@ -299,7 +299,7 @@ def d_health_fakes():
     """The GPU checks really run in Docker, on a fake nvidia-smi and dmesg (Mallik's fakes, team 07): healthy
     nodes pass; each planted fault fails the right check; Xid 94 once is only a warning; and one fault is drained
     end to end by the periodic health check, as on a real node."""
-    hc = (f". /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill {PY} /opt/v5/submission/health/health_check.py "
+    hc = (f". /etc/v5/node.env; V5_HEALTH_STATE=/tmp/hc-drill {PY} /opt/v5/health/health_check.py "
           "--mode periodic --report-only")
 
     def report(host):
@@ -349,7 +349,7 @@ def d_time_limit():
     the trainers, they save and exit 75, Slurm requeues the job with the same id, and it resumes at the saved step
     (Max's self-requeue, team 07)."""
     t = mark("time_limit", cause_class="planned")
-    jid, err = sbatch("/opt/v5/submission/slurm/team_job.sbatch", dict(TEAM_ENV, RUN_ID="timelimit", STEPS="100000"),
+    jid, err = sbatch("/opt/v5/slurm/team_job.sbatch", dict(TEAM_ENV, RUN_ID="timelimit", STEPS="100000"),
                       f"--account=arch {TEAM_ARGS} --time=00:02:00 --signal=B:USR1@60")
     if jid is None:
         raise RuntimeError(err)
@@ -366,13 +366,13 @@ def d_time_limit():
 def d_preemption():
     team = []
     for acct in ("arch", "perf", "eval"):
-        jid, err = sbatch("/opt/v5/submission/slurm/team_job.sbatch", dict(TEAM_ENV, RUN_ID=f"ladder-{acct}"),
+        jid, err = sbatch("/opt/v5/slurm/team_job.sbatch", dict(TEAM_ENV, RUN_ID=f"ladder-{acct}"),
                           f"--account={acct} {TEAM_ARGS}")
         team.append(jid)
     wait(lambda: all(job(j).get("JobState") == "RUNNING" for j in team), 120, "3 team jobs running")
     wait(lambda: ev_after("0", "train.step", run="ladder-arch"), 60, "team job stepping")
     t_submit = mark("preemption", team_jobs=team)
-    jid, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
+    jid, err = sbatch("/opt/v5/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
     wait(lambda: job(jid).get("JobState") == "RUNNING", 180, "main run RUNNING")
     t_run = time.time()
     wait(lambda: ev_after(t_submit, "train.started"), 60, "main run training")
@@ -556,8 +556,8 @@ def d_ctld_failover():
 
 def d_db_backup():
     """Back up the accounting database, restore it into a scratch database, compare table counts."""
-    out = sh("slurmdbd", "DB_ROOT_PASSWORD=simonly bash /opt/v5/submission/slurm/backup_db.sh /s3/backups && "
-                         "DB_ROOT_PASSWORD=simonly bash /opt/v5/submission/slurm/backup_db.sh --verify-latest /s3/backups")
+    out = sh("slurmdbd", "DB_ROOT_PASSWORD=simonly bash /opt/v5/slurm/backup_db.sh /s3/backups && "
+                         "DB_ROOT_PASSWORD=simonly bash /opt/v5/slurm/backup_db.sh --verify-latest /s3/backups")
     lines = [l for l in out.stdout.splitlines() if l.startswith("{")]
     res = json.loads(lines[-1]) if lines else {}
     if res:
@@ -575,7 +575,7 @@ def d_split_brain():
     wait_fresh_commit()
     t = mark("split_brain", cause_class="software")
     out = ctl(f". /etc/v5/node.env; RUN_ID={RUN} V5_EVENTS_DIR=/s3/events {PY} -c \"import sys; "
-              f"sys.path.insert(0,'/opt/v5/submission'); from ckpt.ckpt import Checkpointer; "
+              f"sys.path.insert(0,'/opt/v5'); from ckpt.ckpt import Checkpointer; "
               f"print(Checkpointer('{RUN}', '/tmp/claim', '{REMOTE}').claim())\"")
     epoch = int(out.stdout.strip().splitlines()[-1])
     claimed = latest()
@@ -591,7 +591,7 @@ def d_split_brain():
            cause=held["cause"])
     ctl(f"scancel {jid}")
     t2 = mark("resume_after_fence", cause_class="operator")
-    sbatch("/opt/v5/submission/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
+    sbatch("/opt/v5/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
     rd, fs = wait_recovered(t2)
     record("resume_after_fence", rd["step"] == claimed["step"] and latest()["epoch"] == epoch + 1,
            restored_step=rd["step"], epoch=latest()["epoch"])
@@ -618,7 +618,7 @@ def d_nan_rollback_reshard():
     t2 = mark("rollback", from_step=lt["step"], cause_class="operator")
     env = dict(MAIN_ENV, STEPS=str(lt["step"] + 300),
                TRAIN_EXTRA=f"--from-step {lt['step']} --skip 5 --branch b1")
-    jid2, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", env, f"{MAIN_ARGS} --nodes=1")
+    jid2, err = sbatch("/opt/v5/slurm/mainrun.sbatch", env, f"{MAIN_ARGS} --nodes=1")
     if DS:
         # DeepSpeed: ZeRO pieces are per rank, so a smaller world must be REFUSED (exit 78, ReshardError) until an
         # operator converts the checkpoint (ds_to_universal.py). Then the rollback runs again at the saved size.
@@ -628,7 +628,7 @@ def d_nan_rollback_reshard():
                cause=held["cause"], detail=fatal.get("detail", "")[:160])
         ctl(f"scancel {jid2}")
         t2 = mark("rollback", from_step=lt["step"], cause_class="operator")
-        jid2, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", env, MAIN_ARGS)
+        jid2, err = sbatch("/opt/v5/slurm/mainrun.sbatch", env, MAIN_ARGS)
     rd, fs = wait_recovered(t2)
     record("rollback_skip_branch", rd["skip"] == 5 and rd["branch"] == "b1", restored_step=rd["step"],
            branch=rd["branch"])
@@ -648,14 +648,14 @@ def d_nan_rollback_reshard():
     ctl(f"scancel {jid2}")
     t4 = mark("rollback", from_step=lt2["step"], cause_class="operator")
     env = dict(MAIN_ENV, STEPS=str(lt2["step"] + 60), TRAIN_EXTRA=f"--from-step {lt2['step']} --skip 5 --branch b2")
-    jid3, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", env, MAIN_ARGS if DS else f"{MAIN_ARGS} --nodes=1")
+    jid3, err = sbatch("/opt/v5/slurm/mainrun.sbatch", env, MAIN_ARGS if DS else f"{MAIN_ARGS} --nodes=1")
     done = wait(lambda: ev_after(t4, "train.exit", code=0), 240, "main run finished")
     record("main_run_completes", done["committed"], final_step=done["step"], job=jid3)
 
 
 def d_crash_loop():
     t = mark("crash_loop", cause_class="software")
-    jid, err = sbatch("/opt/v5/submission/slurm/team_job.sbatch",
+    jid, err = sbatch("/opt/v5/slurm/team_job.sbatch",
                       dict(RUN_ID="crashloop", STEPS="50", INTERVAL_S="999", CRASH_AT="3",
                            **({"V5_DEEPSPEED": "1"} if DS else {})),
                       "--account=arch -p cpu --ntasks-per-node=1 --gpus-per-node=0")
@@ -703,10 +703,10 @@ def d_budget_fairshare():
 
 
 def d_retention_export():
-    jid, _ = sbatch(f"--wrap '. /etc/v5/node.env; {PY} /opt/v5/submission/ckpt/ckpt.py retention --run {REMOTE}/{RUN} "
+    jid, _ = sbatch(f"--wrap '. /etc/v5/node.env; {PY} /opt/v5/ckpt/ckpt.py retention --run {REMOTE}/{RUN} "
                     f"--keep 3 --protect-every 5'", args="--account=infra -p cpu", user="root")
     ret = wait(lambda: ev_after("0", "checkpoint.retention", run=None), 120, "retention")
-    exp = ("import sys; sys.path[:0] = ['/opt/v5/submission', '/opt/v5/support/simulation']; from ckpt.ckpt import export_safetensors; "
+    exp = ("import sys; sys.path[:0] = ['/opt/v5', '/opt/v5/support/simulation']; from ckpt.ckpt import export_safetensors; "
            "from trainer.tiny import TinyLM, make_probe_fn; "
            f"print(export_safetensors('{REMOTE}/{RUN}', lambda: TinyLM(1234), make_probe_fn(1234), "
            f"'/s3/exports/{RUN}.safetensors'))")
@@ -737,7 +737,7 @@ def up():
     dc("up", "-d", "--build")
     wait(lambda: "4" in ctl("sinfo -h -t idle -o %D -p debug").stdout, 180, "4 idle nodes")
     # Docker: 2 GPUs per node, so a team's share is 4 GPUs; node cap 3 lets the GPU share be the limit tested.
-    ctl("V5_TEAM_GPUS=4 V5_NODE_CAP=3 bash /opt/v5/submission/slurm/setup_accounts.sh >/dev/null", check=True)
+    ctl("V5_TEAM_GPUS=4 V5_NODE_CAP=3 bash /opt/v5/slurm/setup_accounts.sh >/dev/null", check=True)
     # Test users (fixed UIDs made by entrypoint.sh): alice in arch, bob in perf, carol in no account.
     ctl("S='sacctmgr -i'; $S add user alice Account=arch DefaultAccount=arch >/dev/null 2>&1; "
         "$S add user bob Account=perf DefaultAccount=perf >/dev/null 2>&1; "
@@ -745,7 +745,7 @@ def up():
     ctl("mkdir -p /s3/logs /s3/events /s3/runs /s3/drills /s3/backups && chmod 1777 /s3/*", check=True)
     # Live alerting, as Team 08's pager would run it: every 15 s, new alerts become alert.fired events.
     dc("exec", "-d", "c4", "bash", "-c",
-       f"cd /opt/v5/submission && V5_EVENTS_DIR=/s3/events RUN_ID={RUN} {PY} metrics/watch.py --events /s3/events "
+       f"cd /opt/v5 && V5_EVENTS_DIR=/s3/events RUN_ID={RUN} {PY} metrics/watch.py --events /s3/events "
        f"--run {RUN} --nodes 2 --interval-s {MAIN_ENV['INTERVAL_S']} --every 15 --sim > /s3/logs/watch.log 2>&1")
 
 
@@ -824,7 +824,7 @@ def main():
         return 0 if all(r["pass"] for r in results) else 1
     ctl("scancel -u svc; true")
     log("evaluating metrics")
-    p = ctl(f"cd /opt/v5/submission && {PY} metrics/evaluate.py --events /s3/events --out /s3/report "
+    p = ctl(f"cd /opt/v5 && {PY} metrics/evaluate.py --events /s3/events --out /s3/report "
             f"--prices metrics/prices.yaml --nodes 2 --interval-s {MAIN_ENV['INTERVAL_S']} --run {RUN} --sim")
     print(p.stdout[-4000:], p.stderr[-2000:])
     os.makedirs(RESULTS, exist_ok=True)

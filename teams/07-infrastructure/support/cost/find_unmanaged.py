@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "submission"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from common.events import emit  # noqa: E402
 
 REQUIRED_TAGS = ("v5:cluster", "v5:role", "v5:team", "v5:run")
@@ -72,7 +72,7 @@ def main():
     ap.add_argument("--instances", help="JSON list (test fixture) instead of the AWS API")
     ap.add_argument("--slurm-nodes", help="sinfo -N -o '%%N %%T' output (test fixture)")
     ap.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
-    ap.add_argument("--prices", default=os.path.join(os.path.dirname(__file__), "..", "..", "submission", "metrics", "prices.yaml"))
+    ap.add_argument("--prices", default=os.path.join(os.path.dirname(__file__), "..", "..", "metrics", "prices.yaml"))
     a = ap.parse_args()
     p = yaml.safe_load(open(a.prices))
     prices = {k: v["on_demand_usd_h"] for k, v in p["instances"].items()}

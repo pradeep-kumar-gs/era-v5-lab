@@ -7,7 +7,7 @@ import sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUB = os.path.join(HERE, "..", "..", "submission")
+SUB = os.path.join(HERE, "..", "..")
 sys.path.insert(0, SUB)
 from health import health_check, xid_scan  # noqa: E402
 
