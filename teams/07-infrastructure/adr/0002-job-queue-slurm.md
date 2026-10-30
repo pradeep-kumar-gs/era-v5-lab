@@ -162,6 +162,17 @@ root
   ranks when one exits non-zero, which would break both the save-on-signal and the exit-75 contract. Our
   DeepSpeed drills (`sim_results_deepspeed.md`) run `deepspeed.initialize` from Slurm's variables, no launcher.
 - **`GrpTRESMins` budget** per account, alerts at 50 / 75 / 90% (Q-15), hard stop at 100%.
+  `AccountingStorageEnforce=associations,limits,qos,safe`: with **`safe`** a job starts only if it can finish
+  inside what is left of the budget (its CPUs/GPUs × `--time`). Without it Slurm only stops a team once the
+  budget is already used, so the last job overspends (found by the budget drill in run 16; `safe` is in Max's
+  design). A job that could never fit is refused at submit (`DenyOnLimit`, `AssocGrpCPUMinutesLimit`).
+- **Default time per partition:** `eval` 1 h, `debug` 10 min, `cpu` 1 h. A job without `--time` otherwise gets the
+  QOS `MaxWall` (24 h), above those partitions' `MaxTime`, and pends forever (`PartitionTimeLimit`, run 15).
+  `gpu` has none: team jobs there get the QOS `MaxWall`, the main run no limit.
+- **Order matters in `setup_accounts.sh`:** the QOS that `mainrun` preempts (`normal`, `debug`) are created
+  before `mainrun`'s `Preempt` list is set. sacctmgr rejects the whole list if one name is unknown, and the main
+  run then waits for free nodes instead of preempting (run 15). The script checks the list and stops if it is
+  wrong; the `accounts` drill checks it too.
 - **Capacity calendar:** each week's GPU-hours per team, including Team 05's ladder and the dry runs, agreed
   with the lead.
 
@@ -272,7 +283,11 @@ Each dry run, and the Docker simulation, runs these drills, timed and recorded a
 | NaN | NaN at a set step | no save; exit 78; held |
 | rollback + smaller world | `--from-step --skip 5 --branch b1` on 1 node instead of 2 | restored, resharded, branch b1; run completes |
 | crash loop | a job that crashes at step 3 | requeued twice, then held |
-| budget | `GrpTRESMins` exceeded | next job pending with a GrpCPUMins reason |
+| budget | 2 CPU-minute budget: a job asking 240 CPU-minutes; then one that fits; then another | the big one refused at submit (`AssocGrpCPUMinutesLimit`); the next waits with `AssocGrpCPUMinutesLimit` |
+| limits (Max's T05–T11) | users alice (arch), bob (perf), carol (none) | wrong account and no account refused; third job of a full GPU share waits `AssocGrpGRES`; another user's `scancel` refused; 6 GPUs per job and `--time=25:00:00` refused at submit (`QOSMaxGRESPerJob`, `QOSMaxWallDurationPerJobLimit`); debug QOS: second job `QOSMaxJobsPerUserLimit`, third refused, 2 GPUs refused |
+| time limit | team job `--time=00:02:00 --signal=B:USR1@60` | warning → save → exit 75 → requeued with the same id (`Restarts=1`) → resumed at the saved step, 0 lost |
+| health fakes (ADR 0003) | fake `nvidia-smi`/`dmesg`; planted hot GPU, ECC, row-remap failure, NVLink down, Xid 79, Xid 94 | GPU checks run and pass when healthy; each fault fails the right check; 94 only warns; NVLink down drained by the periodic check |
+| split brain (ADR 0001) | a second attempt claims the run while the main run trains | the old attempt's commit is refused, it is held (`FencedError`), the pointer does not move; resubmit resumes |
 | fair share | heavy vs unused account | heavy account's fair-share factor is lower |
 | retention, export | retention job; safetensors export on the eval partition | no protected checkpoint deleted; probe bit-equal |
 | GPU allocation | main run on 2 nodes × 2 GPUs; a job asking 3 GPUs per node | `gres/gpu=4` allocated; the over-ask refused at submit |
@@ -301,6 +316,15 @@ Each dry run, and the Docker simulation, runs these drills, timed and recorded a
 - **Paging path:** `metrics/watch.py` runs on the head node, recomputes the catalog every 30 s, and on a new
   severity writes `alert.fired` and posts to `V5_ALERT_WEBHOOK` (Team 08's pager or a chat webhook). HIGH pages
   the on-call person. Tested in the simulation (alerts fired live for the drills).
+- **Starting the stack:** `ops/launch.sh` starts munge, slurmdbd, the DB backup with a test restore, the
+  controllers, the accounts, slurmd, a full health check on every node (a failing node is drained), the services,
+  the checkpoint-store probe and the main run, in that order, checking each step and stopping on the first
+  failure (`--from <step>` continues). Tested against the Docker cluster; the `services` step and the SSH
+  transport need real hosts.
+- **Evidence:** every drill writes `support/simulation/results/evidence/<drill>.log` (each command, its exit code
+  and output, and the recorded result), so a reviewer can check a claim without rerunning it (Max's evidence
+  folders). `run_sim.py --smoke` runs accounts, limits, health fakes, preemption and one kill + restore in about
+  3 minutes (Mallik's quick test idea).
 - **Security, designed but not yet tested on AWS:** munge key from Secrets Manager at boot; IAM roles per job type
   (§7); the submit service; SSM-only admin access. These need the AWS account (week 2).
 
@@ -368,6 +392,11 @@ tiny model, checkpoints on the S3 emulator):
 | controller failover | backup in control after 82 s; training never stopped | 0 |
 
 Most of each MTTR is Slurm's requeue wait (`cred_expire=60`, §5; run 11: MTTR 85 s, 31 of 31 drills; run 14: 33 of 33, adding the split-brain drills).
+
+**Latest: run 17 (2026-10-30): 44 of 44 drills pass in 33 minutes**, adding the limit, health-fake and time-limit
+drills of the merge with Mallik's and Max's work; smoke run 13 of 13 in 193 s. Runs 15 and 16 found three
+problems the merge itself had introduced, all fixed above: `mainrun` no longer preempting (QOS order), jobs without
+`--time` pending forever (default times), and budgets that overspend by one job (`safe`).
 The table above is run 9 (`cred_expire=30`); with 60 s each restart is about 30 s longer. Run 3 measured 3–57 s with an
 immediate-restart hack, but run 7 showed that hack can lose the main run, so it was removed. Goodput in the
 simulation is low only because a fault is injected about every minute; ADR 0004 projects the measured

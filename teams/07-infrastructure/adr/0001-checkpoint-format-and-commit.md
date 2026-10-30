@@ -289,8 +289,9 @@ Bad and accepted:
 ## Validation
 
 `python -m pytest support/tests/test_ckpt.py` runs on CPU, with gloo for more than one rank, inside the
-`v5-slurm-sim` image. **All 14 pass with the local store, and the 14 also pass with
-`V5_TEST_REMOTE=s3://…` against the S3 emulator** (2026-10-27).
+`v5-slurm-sim` image. **On 2026-10-30 (T1–T30 and the other suites): 63 pass with the local store and the 34
+checkpoint tests pass with `V5_TEST_REMOTE=s3://…` against the S3 emulator (moto 5.1.10); only the GPU tests T16
+and T23 skip, they run on Kaggle.**
 
 | Test | What it does | Result |
 |---|---|---|
