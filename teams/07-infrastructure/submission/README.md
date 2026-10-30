@@ -34,6 +34,8 @@ submission/
 | Node health | [ADR 0003](adr/0003-node-health-checks.md) | [health/README.md](health/README.md) | `health/health_check.py` |
 | Cost and monitoring | [ADR 0004](adr/0004-cost-model-and-alerting.md) | [metrics/README.md](metrics/README.md) | `metrics/catalog.yaml`, `metrics/watch.py` |
 
+**New here? Start with the [user guide](../USER_GUIDE.md)**: how the system works, and what each team does with it.
+
 Reading order: [adr/README.md](adr/README.md) → the README of the area you care about → for the evidence,
 [review_week1.md](../support/docs/review_week1.md) (what the simulation showed, the questions we expect, and what
 is still open).

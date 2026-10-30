@@ -229,8 +229,14 @@ def d_accounts():
     _, err2 = sbatch("--wrap hostname", args="-p debug", user="noacct")
     if err2:
         emit("job.rejected", user="noacct")
-    record("accounts", jid is not None and "Invalid account" in err2,
-           accepted_job=jid, rejected_no_account=err2[:120])
+    # Accepted is not enough: the job must also run. A job with no --time once pended forever (PartitionTimeLimit,
+    # run 15) because the QOS MaxWall was above the partition's MaxTime.
+    done = wait(lambda: (lambda st: st if st in ("COMPLETED", "FAILED", "CANCELLED") else None)(
+        ctl(f"sacct -X -n -P -j {jid} -o state").stdout.strip().split("\n")[0]) if jid else "none", 60, "job finished")
+    pre = ctl("sacctmgr -n -P show qos mainrun format=preempt").stdout.strip()
+    record("accounts", jid is not None and "Invalid account" in err2 and done == "COMPLETED"
+           and "normal" in pre and "debug" in pre,
+           accepted_job=jid, state=done, mainrun_preempts=pre, rejected_no_account=err2[:120])
 
 
 def submit_as(user, args, wrap="sleep 120"):
@@ -355,15 +361,6 @@ def d_time_limit():
     record("time_limit_self_requeue", rd["step"] == saved["step"] and int(j.get("Restarts", 0)) >= 1,
            job=jid, signal=stop.get("signal"), saved_step=saved["step"], restored_step=rd["step"],
            restarts=j.get("Restarts"), lost_steps=saved["step"] - rd["step"])
-
-
-def d_start_main():
-    """Smoke mode only: start the main run and wait for its first commit."""
-    t = mark("start_main")
-    jid, err = sbatch("/opt/v5/submission/slurm/mainrun.sbatch", MAIN_ENV, MAIN_ARGS)
-    wait(lambda: job(jid).get("JobState") == "RUNNING", 180, "main run RUNNING")
-    c = wait(lambda: ev_after(t, "checkpoint.committed"), 120, "first commit")
-    record("main_run_started", True, job=jid, first_commit=c["step"])
 
 
 def d_preemption():
@@ -771,7 +768,7 @@ def main():
     ap.add_argument("--keep-up", action="store_true", help="leave the cluster running afterwards")
     ap.add_argument("--only", nargs="+", metavar="DRILL", help="run only these drills (debugging; no summary written)")
     ap.add_argument("--smoke", action="store_true",
-                    help="quick check (~5 min after start): limits, health fakes, one kill + restore; no summary written")
+                    help="quick check (~5 min after start): limits, health fakes, preemption, one kill + restore")
     ap.add_argument("--deepspeed", action="store_true",
                     help="every training job uses DeepSpeed ZeRO-1; results go to results_deepspeed/")
     a = ap.parse_args()
@@ -799,7 +796,7 @@ def main():
              ("live_alerts", d_live_alerts)]
     if a.smoke:      # Mallik's 90-second test.sh idea, on this cluster
         plan = [("accounts", d_accounts), ("limits", d_limits), ("health_fakes", d_health_fakes),
-                ("start_main", d_start_main), ("kill_1", d_kill(1))]
+                ("preemption", d_preemption), ("kill_1", d_kill(1))]
     if a.only:
         plan = [(n, f) for n, f in plan if n in a.only]
     for name, fn in plan:

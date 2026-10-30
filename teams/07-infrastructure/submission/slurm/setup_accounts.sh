@@ -13,14 +13,18 @@ TEAM_GPUS="${V5_TEAM_GPUS:-16}"          # GPUs one team may hold at once (EC2: 
 NODE_CAP="${V5_NODE_CAP:-2}"             # nodes one team may hold at once
 TEAM_MAXWALL="${V5_TEAM_MAXWALL:-24:00:00}"
 TEAM_MAXSUBMIT="${V5_TEAM_MAXSUBMIT:-50}"  # queued + running jobs per team
-$S add qos mainrun >/dev/null 2>&1
-$S modify qos mainrun set Priority=1000 Preempt=normal,debug PreemptMode=requeue
 # DenyOnLimit: a job over a per-job limit is refused at submit with the reason, instead of pending forever.
 $S modify qos normal set Priority=10 GraceTime=60 MaxWall="$TEAM_MAXWALL" MaxTRESPerJob=gres/gpu="$TEAM_GPUS" \
   MaxSubmitJobsPerAccount="$TEAM_MAXSUBMIT" Flags=DenyOnLimit
 $S add qos debug >/dev/null 2>&1
 $S modify qos debug set Priority=100 GraceTime=30 MaxWall=00:30:00 MaxTRESPerJob=gres/gpu=1 MaxJobsPerUser=1 \
   MaxSubmitJobsPerUser=2 Flags=DenyOnLimit
+# After the QOS it preempts exist: sacctmgr rejects the whole Preempt list if one name is unknown, and the main
+# run then waits for free nodes instead of taking them (found by the preemption drill, run 15).
+$S add qos mainrun >/dev/null 2>&1
+$S modify qos mainrun set Priority=1000 Preempt=normal,debug PreemptMode=requeue
+pre=$(sacctmgr -n -P show qos mainrun format=preempt)
+[[ "$pre" == *normal* && "$pre" == *debug* ]] || { echo "setup_accounts: mainrun Preempt is '$pre', expected normal,debug" >&2; exit 1; }
 $S add account mainrun Description="V5 main run" Organization=v5 >/dev/null 2>&1
 $S add account teams Description="all teams" Organization=v5 >/dev/null 2>&1
 TEAMS="data tokenizer ke2 arch perf infra monitoring eval posttrain release quant"
