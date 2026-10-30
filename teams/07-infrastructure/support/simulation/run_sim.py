@@ -667,13 +667,23 @@ def d_crash_loop():
 
 
 def d_budget_fairshare():
+    # A 2 CPU-minute budget. Slurm counts a job's *requested* CPU-minutes (CPUs x --time) against what is left:
+    # a job that can never fit is refused at submit (QOS DenyOnLimit), one that fits runs and uses the budget, and
+    # the next one is refused or waits with AssocGrpCPUMinutesLimit.
     ctl("sacctmgr -i modify account quant set GrpTRESMins=cpu=2")
-    j1, _ = sbatch("--wrap 'sleep 45'", args="--account=quant -p cpu -c 4")
+    _, big = sbatch("--wrap 'sleep 45'", args="--account=quant -p cpu -c 4 --time=01:00:00")
+    j1, err1 = sbatch("--wrap 'sleep 45'", args="--account=quant -p cpu -c 2 --time=00:01:00")
+    if j1 is None:
+        raise RuntimeError(f"a job inside the budget was refused: {err1}")
     wait(lambda: job(j1).get("JobState") == "COMPLETED", 120, "budget job done")
-    j2, _ = sbatch("--wrap 'hostname'", args="--account=quant -p cpu")
-    reason = wait(lambda: (lambda r: r if "Min" in r else None)(job(j2).get("Reason", "")), 120, "budget block")
-    ctl(f"scancel {j2}")
-    record("budget_limit", "Min" in reason, reason=reason)
+    time.sleep(5)                                # let the controller add its usage
+    j2, err2 = sbatch("--wrap 'hostname'", args="--account=quant -p cpu -c 2 --time=00:01:00")
+    reason = err2 if j2 is None else wait(
+        lambda: (lambda r: r if "Min" in r else None)(job(j2).get("Reason", "")), 120, "budget block")
+    if j2:
+        ctl(f"scancel {j2}")
+    record("budget_limit", "AssocGrpCPUMinutesLimit" in big and "Min" in reason,
+           too_big_refused=big[:90], next_job=("refused: " if j2 is None else "pending: ") + reason[:90])
     # LevelFS: below 1 = used more than its share. The heavy account must rank below the unused one.
     out = ctl("sshare -n -P -A arch,posttrain -o account,user,rawusage,levelfs").stdout
     rows = {r.split("|")[0].strip(): r.split("|") for r in out.splitlines() if r.strip() and not r.split("|")[1]}
