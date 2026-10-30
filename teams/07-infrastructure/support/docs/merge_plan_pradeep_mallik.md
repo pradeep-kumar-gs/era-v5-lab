@@ -62,6 +62,10 @@ Verdict: **P's checkpoint**, with three additions from M (frozen check at save, 
 
 ### 2. Job queue and Slurm
 
+> **Updated:** the queue now has a third source, Max's `uz9ai/queue`. Its deep review and the three-way
+> verdict are in [queue_review_max.md](queue_review_max.md), which **replaces this section's "Keep" column**:
+> Max's `cluster.toml` installer, QOS limits, configless Slurm and evidence folders join the merged queue.
+
 | Aspect | P | M | Keep (shared node) |
 |---|---|---|---|
 | Slurm version / OS | Ubuntu 24.04, Slurm 23.11 (Docker lab works: we create the cgroup slice by hand) | Ubuntu 26.04, Slurm 25.11 (says 23.11 cannot launch steps in Docker) | **Match the real node's OS** once known (1 Nov). Both configs are plain `slurm.conf`; keep P's 23.11 workaround documented in case the node is 24.04 |
@@ -139,6 +143,8 @@ teams/07-infrastructure/
 | 6 | Move EC2-only parts to `support/ec2/`; `launch.sh` defaults for one host | P | S |
 | 7 | One README with provenance (who wrote which file), one PR | both | S |
 | 8 | On the node (1 Nov): M's TESTING.md level 3, then `launch.sh`; Kaggle run for GPU numbers | both | — |
+
+Queue tasks Q1–Q8 from [queue_review_max.md](queue_review_max.md) slot in after task 1.
 
 ## Questions for the team
 
