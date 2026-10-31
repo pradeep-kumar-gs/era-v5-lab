@@ -316,7 +316,7 @@ def d_health_fakes():
     ok = {}
     for h in ("c1", "c2", "c3"):
         v, st = report(h)
-        ok[h] = (v, st.get("gpu_count"), st.get("nvlink"), st.get("remapped_rows"))
+        ok[h] = (v, st.get("gpu_inventory"), st.get("nvlink"), st.get("remapped_rows"))
     record("health_gpu_checks_run", all(x == ("pass", "pass", "pass", "pass") for x in ok.values()), nodes=ok)
 
     faults = [("gpus", "1 temperature.gpu=92", "gpu_temperature", "fail"),

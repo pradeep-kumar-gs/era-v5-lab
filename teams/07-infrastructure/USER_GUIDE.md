@@ -387,7 +387,7 @@ Alerts arrive through Team 08's pager or the webhook in `V5_ALERT_WEBHOOK`; each
 
 | Check | Do |
 |---|---|
-| `xid`, `ecc_uncorrectable`, `remapped_rows`, `dcgm_diag`, `gpu_count` | replace the instance / open a hardware ticket; reboot first for `gpu_count` |
+| `xid`, `ecc_uncorrectable`, `remapped_rows`, `dcgm_diag`, `gpu_inventory` | replace the instance / open a hardware ticket; reboot first for `gpu_inventory` |
 | `nvlink` | reset GPUs or reboot; replace if the link stays down |
 | `nccl_<op>` or `nccl_collectives` | `health_check.py --mode full` on it; replace if it fails again; read the flight-recorder dump |
 | `gpu_temperature` | check cooling |

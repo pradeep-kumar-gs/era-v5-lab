@@ -167,12 +167,25 @@ Every run prints one JSON report (also sent as the `health.report` event):
 
 ```json
 {
-  "schema": "v5-health/1", "time": "2026-10-28T10:00:00Z", "host": "gpu-3", "mode": "periodic",
+  "schema": "v5-health/1", "timestamp_utc": "2026-10-28T10:00:00.000Z", "time": "(same)", "host": "gpu-3",
+  "mode": "periodic", "expected_gpus": 8,
   "checks": [{"name": "ecc_uncorrectable", "status": "fail", "required": true,
-              "detail": "GPU 5: 2 uncorrectable", "metrics": {}, "gpu": 5, "seconds": 0.4}],
-  "verdict": "fail", "drain_reason": "ecc_uncorrectable", "runtime_seconds": 1.9
+              "detail": "uncorrectable on GPU 5 (2)", "metrics": {"values": [0, 0, 0, 0, 0, 2, 0, 0]},
+              "gpu": 5, "seconds": 0.4}],
+  "verdict": "fail", "admit_training": false, "drain_reason": "ecc_uncorrectable", "runtime_seconds": 1.9
 }
 ```
+
+The format is **Team 08's `v5-health/1` contract** (`teams/08-monitoring/health-check/`, lab PR #125), so their
+monitoring and ClickHouse loader read our reports as they are: `gpu_inventory` (`count`, one line per GPU),
+`ecc_uncorrectable` (`values`, one per GPU), `xid` (`counts` + `events` with `pci_bdf`, `code`, `severity`
+warn/fail, `reason`), collectives (`backend`, `world_size`, `status`, per size `bytes`, `seconds`, `max_error`,
+`all_ranks_correct`). We add fields of our own (`gpu`, `seconds`, `runtime_seconds`, `time`, Xid `new`, busbw);
+the contract allows extra fields. `support/tests/test_health.py` checks real reports against the contract;
+[team08_contract_notes.md](../support/docs/team08_contract_notes.md) lists the changes and our suggestions to Team 08.
+Two differences are open with Team 08: `admit_training` is true on a `warn` (our prolog starts the job on a
+warn; their draft says false), and a CPU `gloo` collective passes on a node with no real GPUs (Docker, CPU test
+hosts; their draft never lets gloo pass).
 
 ---
 

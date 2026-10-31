@@ -105,12 +105,23 @@ V4's repository has **no GPU health check at all**. The scripts must run on a la
 
 ```json
 {
-  "schema": "v5-health/1", "time": "UTC ISO-8601", "host": "...", "mode": "prolog|periodic|full",
+  "schema": "v5-health/1", "timestamp_utc": "UTC ISO-8601", "time": "(same)", "host": "...",
+  "mode": "prolog|periodic|full", "expected_gpus": 8,
   "checks": [{"name": "ecc_uncorrectable", "status": "pass|warn|fail|skipped",
-              "required": true, "detail": "...", "metrics": {}, "gpu": 0, "seconds": 0.0}],
-  "verdict": "pass|warn|fail", "drain_reason": null, "runtime_seconds": 0.0
+              "required": true, "detail": "...", "metrics": {"values": [0, 0, 0, 0, 0, 0, 0, 0]},
+              "gpu": null, "seconds": 0.0}],
+  "verdict": "pass|warn|fail", "admit_training": true, "drain_reason": null, "runtime_seconds": 0.0
 }
 ```
+
+- **Team 08's contract (31 Oct).** `v5-health/1` is the format Team 08 validates and loads into ClickHouse
+  (lab PR #125). We follow it: check names `gpu_inventory`, `ecc_uncorrectable` (one value per GPU), `xid`
+  (`counts` + `events`), collective metrics (`backend`, `world_size`, `status`, `max_error`,
+  `all_ranks_correct` per size), and the report fields `timestamp_utc`, `expected_gpus`, `admit_training`.
+  *Why:* one format means their dashboards need no Team 07 special case. Two points are open with them:
+  `admit_training` stays true on `warn` (a warn is shown, not a stop: a missing optional tool on every node
+  would otherwise block the whole run), and a CPU `gloo` collective may pass when the node has no real GPU
+  (Docker and CPU test hosts), never on a GPU node.
 
 - A missing tool gives `skipped` with the reason. `skipped` never turns into `pass` or `fail`.
 - **Verdict:** any `fail` → `fail`. Otherwise any `warn`, or any `skipped` check marked `required` (GPU checks

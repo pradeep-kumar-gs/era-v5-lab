@@ -191,8 +191,8 @@ python metrics/explain.py v5:ecc_uncorrectable,xid
 
 | Reason | You do |
 |---|---|
-| `xid` (fatal code, or Xid 94 twice in 24 h on one GPU), `ecc_uncorrectable`, `remapped_rows` (failure), `dcgm_diag`, `gpu` | replace the instance (stop/start moves it to new hardware); open a hardware ticket |
-| `gpu_count` | reboot; replace if still missing |
+| `xid` (fatal code, or Xid 94 twice in 24 h on one GPU), `ecc_uncorrectable`, `remapped_rows` (failure), `dcgm_diag` | replace the instance (stop/start moves it to new hardware); open a hardware ticket |
+| `gpu_inventory` (GPUs missing, or nvidia-smi fails) | reboot; replace if still wrong |
 | `gpu_temperature` | check cooling; replace if repeated |
 | `nvme_free` | clean `/nvme` |
 | `clock_offset` | fix chrony |

@@ -173,10 +173,8 @@ CAUSES = {
 DRAIN = {
     "spot_notice": ("the cloud will reclaim this spot instance in 2 minutes.",
                     "node drained, jobs saved and moved to the spare", "nothing; the instance goes away by itself"),
-    "gpu": ("nvidia-smi could not run on a GPU node (driver broken or GPU hung).", "node drained, jobs saved and moved",
-            "reboot the instance; if nvidia-smi still fails, replace it"),
-    "gpu_count": ("Fewer GPUs visible than expected.", "node drained, jobs saved and moved",
-                  "reboot the instance; if still missing, replace it"),
+    "gpu_inventory": ("Fewer GPUs visible than expected, or nvidia-smi could not run (driver broken or GPU hung).",
+                      "node drained, jobs saved and moved", "reboot the instance; if still wrong, replace it"),
     "ecc_uncorrectable": ("A GPU memory error lost data.", "node drained, jobs saved and moved",
                           "replace the instance (stop/start moves it to new hardware)"),
     "remapped_rows": ("GPU memory row remap failed (or is pending a reset).", "node drained on failure",
