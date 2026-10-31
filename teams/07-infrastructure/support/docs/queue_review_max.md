@@ -102,7 +102,7 @@ only and updates that plan's queue section.
 |---|---|---|---|---|
 | uz9ai | batch shell runs `deepspeed` launcher; shell forwards SIGUSR1 to rank PIDs from files | ranks only (by PID files) | launcher passes the rank's 75 through | the cloud, 1 GPU (T12b) |
 | millermuttu | `srun` 1 task/node → `torchrun` (c10d rendezvous, new id per restart) | torchrun agent (forwards SIGTERM/SIGINT; SIGUSR1 handling depends on version) | agent exit code | Docker, 2 nodes × 2 CPU ranks |
-| pradeep-kumar-gs | `srun` one task per GPU running the trainer directly (uz9ai's ADR-10 **alternative b**); `job_queue.py` wraps `srun` | every rank directly (Slurm signals the step) | wrapper maps to 0/75/78 | Docker, 2 nodes × 2 ranks, **also with DeepSpeed** (DS sim 31/31: `deepspeed.initialize` from Slurm's variables, no launcher) |
+| pradeep-kumar-gs | `srun` one task per GPU running the trainer directly (uz9ai's ADR-10 **alternative b**); `job_queue.py` wraps `srun` | every rank directly (Slurm signals the step) | wrapper maps to 0/75/78 | Docker, 2 nodes × 2 ranks, the DeepSpeed trainer starts the same way (`deepspeed.initialize` from Slurm's variables, no launcher) |
 
 **Keep P's shape** as the default: it has no launcher to protect, and our DeepSpeed simulation already proves
 uz9ai's fallback (b) works. Keep **uz9ai's ADR-10 text** in the ADR as the reason, and his PID-file template as the

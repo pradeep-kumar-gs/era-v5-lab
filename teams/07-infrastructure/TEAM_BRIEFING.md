@@ -198,7 +198,9 @@ login key). A script that checks each step makes the first day boring.
 **What.** The checkpoint works with the three ways Team 05 may train: plain data-parallel PyTorch, PyTorch's sharded
 mode (FSDP), and **DeepSpeed** (ZeRO stages 1, 2 and 3). DeepSpeed writes its own files; we wrap them in the same
 commit, fencing and proofs. One limit: a DeepSpeed checkpoint saved on N GPUs is refused on a different N until an
-operator converts it with DeepSpeed's own tool, because its files are split per GPU.
+operator converts it with DeepSpeed's own tool, because its files are split per GPU. DeepSpeed is **optional**:
+it is off unless the trainer runs with `--deepspeed`, and only `ckpt/ds_ckpt.py` imports it, so a cluster without
+DeepSpeed installed runs everything else unchanged.
 
 **Why.** Team 05 has not fixed the training framework yet; the infrastructure must not decide it for them.
 

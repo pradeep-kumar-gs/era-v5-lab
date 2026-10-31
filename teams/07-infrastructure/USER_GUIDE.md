@@ -225,7 +225,7 @@ python /opt/v5/ckpt/ckpt.py list --run /shared/ckpt/<RUN_ID>         # committed
 the process group from those (the test trainer does: `support/simulation/trainer/train.py`). Why not a launcher:
 the `deepspeed` launcher dies on SIGUSR1 and kills all ranks when one exits non-zero, which breaks both the
 save-on-signal and the exit-75 contract (uz9ai's analysis, ADR 0002 §4). DeepSpeed itself works this way: our
-DeepSpeed drills call `deepspeed.initialize` with no launcher.
+The DeepSpeed test trainer calls `deepspeed.initialize` with no launcher.
 
 ### 3.2 The skeleton
 
@@ -510,7 +510,7 @@ Checkpoint tests T1–T30 are listed in `ckpt/README.md` §10; DeepSpeed tests (
 ```bash
 python3 support/simulation/run_sim.py --smoke        # ~5 min after start: accounts, limits, health fakes, kill + restore
 python3 support/simulation/run_sim.py                # every drill (~35 min); writes results/ and docs/sim_results.md
-python3 support/simulation/run_sim.py --deepspeed    # every drill with the DeepSpeed trainer
+python3 support/simulation/run_sim.py --deepspeed    # optional: every drill with the DeepSpeed trainer (not part of the submitted results)
 python3 support/simulation/run_sim.py --store folder # every drill with checkpoints on a shared file system (bare metal)
 python3 support/simulation/run_sim.py --only limits time_limit --keep-up    # some drills, leave the cluster up
 docker compose -f support/simulation/slurm-docker/docker-compose.yml exec slurmctld bash   # look around

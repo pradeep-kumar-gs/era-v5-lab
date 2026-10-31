@@ -24,7 +24,7 @@ that proves it. Everything here is CPU or Docker evidence unless it says GPU.
 | 26 | Topology-changing restart | Design/proofs | plain/FSDP: restore 4 → 1 ranks, digest equal, branch marked resharded. DeepSpeed: refused with exit 78 `ReshardError` naming `ds_to_universal.py` | T2, T16 (GPU), T20; drill `restore_smaller_world` |
 | 27 | Strict restore, no silent misload | Probe+key checks | strict keys + 4 proofs (digest, probe loss bits, next batch, frozen hashes); DeepSpeed "could not load" → fallback, never a fresh start | T5, T19 |
 | 28 | Data ledger | Ledger | one global offset on every rank, checked at every save; loader contract test for Teams 01/02 | T13, T15 |
-| 29 | DeepSpeed at the checkpoint boundary | **Not verified** (all four repos) | real all-rank DeepSpeed save/load with optimizer state, ZeRO-1/2/3; whole Docker drill set on DeepSpeed | T18–T22; `support/docs/sim_results_deepspeed.md` (31/31) |
+| 29 | DeepSpeed at the checkpoint boundary | **Not verified** (all four repos) | real all-rank DeepSpeed save/load with optimizer state, ZeRO-1/2/3 (optional backend, off by default) | T18–T22 |
 | 33 | Export for eval/quant | Docs | DCP → safetensors and DeepSpeed `zero_to_fp32` → safetensors, digest-checked against the saved weights | T8, T22 |
 
 From `03_VALIDATION_AND_HANDOFF.md`: "DeepSpeed ZeRO save/restart: **NOT RUN**, DeepSpeed not installed".

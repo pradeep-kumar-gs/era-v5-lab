@@ -167,7 +167,8 @@ root
 - **Launch shape:** `srun` starts one trainer per GPU directly, with no launcher in between (uz9ai's ADR-10
   "alternative b"). uz9ai checked in DeepSpeed's source that the `deepspeed` launcher dies on SIGUSR1 and kills all
   ranks when one exits non-zero, which would break both the save-on-signal and the exit-75 contract. Our
-  DeepSpeed drills (`sim_results_deepspeed.md`) run `deepspeed.initialize` from Slurm's variables, no launcher.
+  DeepSpeed test trainer (`train.py --deepspeed`, tests T18–T22) runs `deepspeed.initialize` from Slurm's
+  variables, no launcher.
 - **`GrpTRESMins` budget** per account, alerts at 50 / 75 / 90% (Q-15), hard stop at 100%.
   `AccountingStorageEnforce=associations,limits,qos,safe`: with **`safe`** a job starts only if it can finish
   inside what is left of the budget (its CPUs/GPUs × `--time`). Without it Slurm only stops a team once the

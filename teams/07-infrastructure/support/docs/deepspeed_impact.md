@@ -263,12 +263,12 @@ to hold: `engine.skipped_steps` grows on overflow. Track it (§4).
 The plan above is now code: `ckpt/ds_ckpt.py` (`DSCheckpointer`, `export_ds`), `train.py --deepspeed
 --zero-stage {0,1,2,3} --ds-precision {fp32,fp16,bf16}`, and tests T18–T23 in `support/tests/test_ckpt.py`.
 The [verify] above about CPU is **answered: wrong.** DeepSpeed's CPU accelerator works with plain gloo (0.18.0 in
-the cluster image, 0.19.8 on a Mac), so the Docker cluster runs every drill with the DeepSpeed trainer too:
-`run_sim.py --deepspeed` writes `support/docs/sim_results_deepspeed.md`: **31/31 drills passed (1779 s)** with every
-training job on DeepSpeed ZeRO-1. The one drill whose answer changes, `restore_smaller_world`, now passes by being
-*held* (exit 78, `ReshardError`, names `ds_to_universal.py`); the rollback then runs at the saved world size. Two
-earlier runs failed first and found findings 6 (bucket memory, OOM) and 7 (below); one more lost 5 drills to
-timeouts on a busy laptop and passed on the rerun.
+the cluster image, 0.19.8 on a Mac), so the Docker cluster can run every drill with the DeepSpeed trainer too
+(`run_sim.py --deepspeed`). On 29 Oct that run passed every drill; `restore_smaller_world` passes by being *held*
+(exit 78, `ReshardError`, names `ds_to_universal.py`). Earlier runs found findings 6 (bucket memory, OOM) and 7
+(below). **That run was before the merge and the folder changes, so its results are not part of the submission;**
+the evidence for DeepSpeed is the unit tests below (T18–T22, re-run on the current code). DeepSpeed is an
+**optional** backend: off unless the trainer runs with `--deepspeed`, and imported only by `ckpt/ds_ckpt.py`.
 
 Test numbers below are the built ones; they replace the planned list in §1.11.
 

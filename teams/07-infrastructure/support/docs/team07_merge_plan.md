@@ -61,7 +61,7 @@ TSAI). The detailed reviews behind this page: [merge_plan.md](merge_plan.md)
 | Main-run protection | **P**'s `mainrun` QoS with requeue preemption, **if the main run shares the node with team jobs** | X's no-preemption fits only separate nodes |
 | Exit-code contract | **P**: 0 done, 75 requeue, 78 hold, 3 crashes in 30 min → hold, job comment in plain words | X: any crash = `FAILED`, no hold path; M: requeue on node loss only |
 | Time limits | **X**: `--signal=B:USR1@<lead>` before `MaxWall`, self-requeue, `lead ≥ 2 × save + 60 s` | P runs the main run with no time limit |
-| Launch shape | **P**: `srun` one task per GPU, trainer called directly (X's ADR-10 "alternative b"; P's DeepSpeed drills prove it) **+ X's ADR-10 text** as the reason **+ M's rendezvous id per restart** if torchrun is ever used | no launcher that dies on SIGUSR1, no PID files |
+| Launch shape | **P**: `srun` one task per GPU, trainer called directly (X's ADR-10 "alternative b"; P's DeepSpeed trainer runs this way) **+ X's ADR-10 text** as the reason **+ M's rendezvous id per restart** if torchrun is ever used | no launcher that dies on SIGUSR1, no PID files |
 | Prolog / epilog / periodic health hooks | **P** (`PrologFlags=Alloc`, `nohold_on_prolog_fail`, scripts drain via `scontrol`) | X designed the same rules but left health off (`health/launch.sh --quick` does not exist) |
 | Accounting DB backup | **P** (dump + **test restore**) + X's daily block-volume/state snapshot note | |
 | Hot spare, spot watcher, controller failover, cloud cost | **park in `support/cloud/`** | no spare, spot or second host on one shared node |
